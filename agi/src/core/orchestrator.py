@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping
 
 from .critic import Critic
 from .memory import MemoryStore
 from .planner import Planner
+from .safety import SafetyDecision, enforce_plan_safety
 from .types import Belief, Plan, Report, RunContext, Source, ToolResult
 from .world_model import WorldModel
+from ..governance.gatekeeper import Gatekeeper
 
 
 @dataclass
@@ -20,6 +22,7 @@ class Orchestrator:
     tools: Mapping[str, Any]
     memory: MemoryStore
     world_model: WorldModel
+    gatekeeper: Gatekeeper | None = None
     working_dir: Path = Path("artifacts")
 
     async def run(self, goal_spec: Dict[str, Any], constraints: Dict[str, Any] | None = None) -> Report:
@@ -30,6 +33,9 @@ class Orchestrator:
 
         hypotheses = goal_spec.get("hypotheses", [])
         plans = await self.planner.plan_from(hypotheses)
+        safety_audit: List[SafetyDecision] = []
+        if self.gatekeeper is not None:
+            safety_audit = enforce_plan_safety(plans, self.tools, self.gatekeeper)
         for plan in plans:
             critique = await self.critic.check(_plan_to_dict(plan))
             if critique.get("status") != "PASS":
@@ -85,6 +91,7 @@ class Orchestrator:
             "constraints": constraints,
             "tool_results": [asdict(result) for result in tool_results],
             "belief_updates": [asdict(b) for b in updates],
+            "safety_audit": [decision.as_dict() for decision in safety_audit],
         }
         (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
