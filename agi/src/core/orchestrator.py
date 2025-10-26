@@ -78,20 +78,29 @@ class Orchestrator:
         for entry in memory_entries:
             self.memory.append(entry)
 
-        updates = self.world_model.update(
-            {
-                "claim_id": (plan.claim_ids[0] if plan.claim_ids else plan.id),
-                "passed": all(res.ok for res in plan_results.get(plan.id, [])),
-                "provenance": [
-                    asdict(src)
-                    for res in plan_results.get(plan.id, [])
-                    for src in res.provenance
-                ],
-                "expected_unit": goal_spec.get("expected_unit"),
-                "observed_unit": goal_spec.get("observed_unit", goal_spec.get("expected_unit")),
-            }
-            for plan in plans
-        )
+        update_payloads: List[Dict[str, Any]] = []
+        for plan in plans:
+            claim_ids = list(plan.claim_ids) or [plan.id]
+            plan_ok = all(res.ok for res in plan_results.get(plan.id, []))
+            provenance = [
+                asdict(src)
+                for res in plan_results.get(plan.id, [])
+                for src in res.provenance
+            ]
+            for claim_id in claim_ids:
+                update_payloads.append(
+                    {
+                        "claim_id": claim_id,
+                        "passed": plan_ok,
+                        "provenance": provenance,
+                        "expected_unit": goal_spec.get("expected_unit"),
+                        "observed_unit": goal_spec.get(
+                            "observed_unit", goal_spec.get("expected_unit")
+                        ),
+                    }
+                )
+
+        updates = self.world_model.update(update_payloads)
 
         manifest = {
             "run_id": run_id,
