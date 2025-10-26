@@ -93,3 +93,46 @@ def test_orchestrator_tracks_plan_results_independently(tmp_path):
 
     assert memory.query_by_tool("fail_tool")
     assert memory.query_by_tool("success_tool")
+
+
+def test_orchestrator_updates_all_claims(tmp_path):
+    planner_response = {
+        "plans": [
+            {
+                "id": "plan-1",
+                "claim_ids": ["claim-1", "claim-2"],
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "tool": "success_tool",
+                        "args": {},
+                        "safety_level": "T0",
+                    }
+                ],
+                "expected_cost": {},
+                "risks": [],
+                "ablations": [],
+            }
+        ]
+    }
+
+    planner = Planner(llm=lambda payload: json.dumps(planner_response))
+    critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    world_model = WorldModel()
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools={"success_tool": StubTool(ok=True)},
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+    )
+
+    report = asyncio.run(orchestrator.run({"goal": "demo"}, {}))
+
+    assert sorted(b.claim_id for b in report.belief_deltas) == [
+        "claim-1",
+        "claim-2",
+    ]
+    assert set(orchestrator.world_model.beliefs.keys()) == {"claim-1", "claim-2"}
