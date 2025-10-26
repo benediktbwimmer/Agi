@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
@@ -25,7 +26,8 @@ class MemoryStore:
     path: Path
     _lock: Lock = field(default_factory=Lock, init=False)
     _claim_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
-    _time_index: List[tuple[datetime, Dict[str, Any]]] = field(default_factory=list, init=False)
+    _time_keys: List[datetime] = field(default_factory=list, init=False)
+    _time_records: List[Dict[str, Any]] = field(default_factory=list, init=False)
     _tool_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
     _source_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
 
@@ -55,10 +57,11 @@ class MemoryStore:
     def query_by_time(self, start: str, end: str) -> List[Dict[str, Any]]:
         start_ts = _normalise_time(start)
         end_ts = _normalise_time(end)
+        start_idx = bisect_left(self._time_keys, start_ts)
+        end_idx = bisect_right(self._time_keys, end_ts)
         return [
             json.loads(json.dumps(record))
-            for ts, record in self._time_index
-            if start_ts <= ts <= end_ts
+            for record in self._time_records[start_idx:end_idx]
         ]
 
     def query_by_tool(self, tool_name: str) -> List[Dict[str, Any]]:
@@ -71,9 +74,12 @@ class MemoryStore:
         if "time" in record:
             try:
                 ts = _normalise_time(record["time"])
-                self._time_index.append((ts, record))
             except ValueError:  # pragma: no cover - invalid timestamp
                 pass
+            else:
+                insert_at = bisect_right(self._time_keys, ts)
+                self._time_keys.insert(insert_at, ts)
+                self._time_records.insert(insert_at, record)
         if record.get("type") == "semantic":
             claim = record.get("claim", {})
             claim_id = claim.get("id")

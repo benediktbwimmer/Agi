@@ -56,3 +56,20 @@ def test_tool_index(memory_path: Path) -> None:
     store.append(record)
     results = store.query_by_tool("python_runner")
     assert len(results) == 1
+
+
+def test_query_by_time_is_sorted(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+    records = [
+        {"type": "event", "time": "2024-01-01T00:02:00+00:00", "payload": 2},
+        {"type": "event", "time": "2024-01-01T00:01:00+00:00", "payload": 1},
+        {"type": "event", "time": "2024-01-01T00:03:00+00:00", "payload": 3},
+    ]
+    for record in records:
+        store.append(record)
+
+    results = store.query_by_time(
+        "2024-01-01T00:00:00+00:00", "2024-01-01T00:04:00+00:00"
+    )
+
+    assert [entry["payload"] for entry in results] == [1, 2, 3]
