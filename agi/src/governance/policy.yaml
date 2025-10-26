@@ -1,0 +1,10 @@
+safety:
+  network: off
+  t1_review: auto
+  t2_review: human
+  refusals:
+    - biological
+    - chemical
+    - cyber
+    - weapons
+    - privacy

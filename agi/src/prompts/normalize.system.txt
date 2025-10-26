@@ -1,0 +1,1 @@
+Rewrite goals into precise JSON specs with objectives, constraints, and acceptance criteria.
