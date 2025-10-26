@@ -42,9 +42,12 @@ class Orchestrator:
                 raise RuntimeError(f"Plan {plan.id} rejected: {critique}")
 
         tool_results: List[ToolResult] = []
+        plan_results: Dict[str, List[ToolResult]] = {}
         memory_entries: List[Dict[str, Any]] = []
 
         for plan in plans:
+            per_plan_results: List[ToolResult] = []
+            plan_results[plan.id] = per_plan_results
             for step in plan.steps:
                 tool = self.tools.get(step.tool)
                 if tool is None:
@@ -57,6 +60,7 @@ class Orchestrator:
                     record_provenance=True,
                 )
                 result = await tool.run({**step.args, "id": step.id}, ctx)
+                per_plan_results.append(result)
                 tool_results.append(result)
                 memory_entries.append(
                     {
@@ -77,8 +81,12 @@ class Orchestrator:
         updates = self.world_model.update(
             {
                 "claim_id": (plan.claim_ids[0] if plan.claim_ids else plan.id),
-                "passed": all(res.ok for res in tool_results),
-                "provenance": [asdict(src) for res in tool_results for src in res.provenance],
+                "passed": all(res.ok for res in plan_results.get(plan.id, [])),
+                "provenance": [
+                    asdict(src)
+                    for res in plan_results.get(plan.id, [])
+                    for src in res.provenance
+                ],
                 "expected_unit": goal_spec.get("expected_unit"),
                 "observed_unit": goal_spec.get("observed_unit", goal_spec.get("expected_unit")),
             }
