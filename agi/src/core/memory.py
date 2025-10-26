@@ -80,8 +80,10 @@ class MemoryStore:
                 insert_at = bisect_right(self._time_keys, ts)
                 self._time_keys.insert(insert_at, ts)
                 self._time_records.insert(insert_at, record)
-        if record.get("type") == "semantic":
+        claim = record.get("claim")
+        if record.get("type") == "semantic" and not isinstance(claim, dict):
             claim = record.get("claim", {})
+        if isinstance(claim, dict):
             claim_id = claim.get("id")
             if claim_id:
                 self._claim_index.setdefault(claim_id, []).append(record)
