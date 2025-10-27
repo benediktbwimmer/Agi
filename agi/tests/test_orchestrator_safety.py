@@ -62,6 +62,36 @@ def _plan(step_tier: str) -> Plan:
     )
 
 
+def _branch_plan() -> Plan:
+    return Plan(
+        id="plan-branch",
+        claim_ids=["claim-branch"],
+        steps=[
+            {
+                "id": "root",
+                "tool": "dummy",
+                "args": {"id": "root"},
+                "branches": [
+                    {
+                        "condition": "on_success(root)",
+                        "steps": [
+                            {
+                                "id": "danger",
+                                "tool": "dummy",
+                                "args": {"id": "danger"},
+                                "safety_level": "T3",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        expected_cost={},
+        risks=[],
+        ablations=[],
+    )
+
+
 def test_orchestrator_denies_disallowed_tier(tmp_path: Path) -> None:
     planner = StaticPlanner([_plan(step_tier="T2")])
     orchestrator = Orchestrator(
@@ -99,3 +129,19 @@ def test_orchestrator_records_safety_audit(tmp_path: Path) -> None:
     audit = manifest.get("safety_audit")
     assert audit and audit[0]["approved"] is True
     assert audit[0]["effective_level"] == "T1"
+
+
+def test_orchestrator_checks_branch_tiers(tmp_path: Path) -> None:
+    planner = StaticPlanner([_branch_plan()])
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=_critic(),
+        tools={"dummy": DummyTool()},
+        memory=_memory(tmp_path),
+        world_model=_world_model(),
+        gatekeeper=Gatekeeper(policy={}),
+        working_dir=tmp_path,
+    )
+
+    with pytest.raises(PermissionError):
+        asyncio.run(orchestrator.run({"goal": "test", "hypotheses": [{"id": "h1"}]}))

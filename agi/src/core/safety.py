@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from typing import Dict, Iterable, Mapping
 
 from ..governance.gatekeeper import Gatekeeper
-from .types import Plan, ToolCall
+from .types import Plan, PlanStep, ToolCall
 
 
 _TIER_ORDER = {
@@ -56,7 +56,7 @@ class SafetyDecision:
         return asdict(self)
 
 
-def _resolve_tool(tools: Mapping[str, object], call: ToolCall) -> object:
+def _resolve_tool(tools: Mapping[str, object], call: ToolCall | PlanStep) -> object:
     tool = tools.get(call.tool)
     if tool is None:
         raise KeyError(f"Unknown tool {call.tool}")
@@ -92,7 +92,7 @@ def enforce_plan_safety(
     denied: list[SafetyDecision] = []
 
     for plan in plans:
-        for step in plan.steps:
+        for step in plan.iter_tool_calls():
             tool = _resolve_tool(tools, step)
             tool_level = getattr(tool, "safety", "T0")
             requested_level = step.safety_level or tool_level
