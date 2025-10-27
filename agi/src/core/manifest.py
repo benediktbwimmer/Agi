@@ -67,6 +67,18 @@ class ManifestSafetyDecision(BaseModel):
     reason: str | None = None
 
 
+class ManifestCritique(BaseModel):
+    """Critique emitted by the critic during planning."""
+
+    plan_id: str
+    status: str
+    reviewer: str | None = "critic"
+    notes: str | None = None
+    summary: str | None = None
+    amendments: Sequence[str] | None = None
+    issues: Sequence[str] | None = None
+
+
 class RunManifest(BaseModel):
     """Versioned manifest describing an orchestrator execution."""
 
@@ -78,6 +90,7 @@ class RunManifest(BaseModel):
     tool_results: Sequence[ManifestToolResult]
     belief_updates: Sequence[ManifestBeliefUpdate]
     safety_audit: Sequence[ManifestSafetyDecision] = Field(default_factory=list)
+    critiques: Sequence[ManifestCritique] = Field(default_factory=list)
 
     @field_validator("created_at")
     @classmethod
@@ -100,6 +113,7 @@ class RunManifest(BaseModel):
         tool_results: Iterable[ToolResult],
         belief_updates: Iterable[Belief],
         safety_audit: Iterable[SafetyDecision],
+        critiques: Iterable[Mapping[str, Any]] | None = None,
     ) -> "RunManifest":
         """Construct a manifest from runtime dataclasses."""
 
@@ -124,6 +138,7 @@ class RunManifest(BaseModel):
             tool_results=_normalise(tool_results),
             belief_updates=_normalise(belief_updates),
             safety_audit=_normalise(safety_audit),
+            critiques=_normalise(critiques or []),
         )
         return manifest
 
@@ -146,6 +161,7 @@ class RunManifest(BaseModel):
 __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "ManifestBeliefUpdate",
+    "ManifestCritique",
     "ManifestSafetyDecision",
     "ManifestSource",
     "ManifestToolResult",

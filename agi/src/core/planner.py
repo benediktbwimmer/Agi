@@ -15,8 +15,16 @@ class PlannerError(RuntimeError):
 class Planner:
     llm: Callable[[Dict[str, Any]], str]
 
-    async def plan_from(self, hypotheses: Iterable[Dict[str, Any]]) -> List[Plan]:
+    async def plan_from(
+        self,
+        hypotheses: Iterable[Dict[str, Any]],
+        *,
+        feedback: Iterable[Dict[str, Any]] | None = None,
+    ) -> List[Plan]:
         payload = {"hypotheses": list(hypotheses)}
+        feedback_list = list(feedback or [])
+        if feedback_list:
+            payload["feedback"] = feedback_list
         raw = self.llm(payload)
         try:
             data = json.loads(raw)

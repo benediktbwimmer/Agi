@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ class Orchestrator:
     gatekeeper: Gatekeeper | None = None
     working_dir: Path = Path("artifacts")
     telemetry: Telemetry | None = None
+    max_replans: int = 2
 
     def _emit(self, event: str, **payload: Any) -> None:
         if self.telemetry is not None:
@@ -39,24 +41,54 @@ class Orchestrator:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         hypotheses = goal_spec.get("hypotheses", [])
-        plans = await self.planner.plan_from(hypotheses)
+        feedback: List[Dict[str, Any]] = []
+        critiques: List[Dict[str, Any]] = []
+        memory_entries: List[Dict[str, Any]] = []
+        plans: List[Plan] = []
+        for attempt in range(self.max_replans + 1):
+            plans = await self.planner.plan_from(hypotheses, feedback=feedback)
+            plan_critiques: List[Dict[str, Any]] = []
+            replan_required = False
+            for plan in plans:
+                self._emit(
+                    "orchestrator.plan_ready",
+                    run_id=run_id,
+                    plan_id=plan.id,
+                    step_count=len(plan.steps),
+                )
+                critique = await self.critic.check(_plan_to_dict(plan))
+                status = str(critique.get("status", "FAIL")).upper()
+                if status == "PASS":
+                    continue
+                critique_record = _normalise_critique(plan.id, critique)
+                critiques.append(critique_record)
+                memory_entries.append(
+                    _critique_memory_record(
+                        critique_record,
+                        default_time=goal_spec.get(
+                            "time", "1970-01-01T00:00:00+00:00"
+                        ),
+                    )
+                )
+                if status == "FAIL" and not (
+                    critique_record.get("amendments")
+                    or critique_record.get("issues")
+                ):
+                    raise RuntimeError(f"Plan {plan.id} rejected: {critique}")
+                plan_critiques.append(critique_record)
+                replan_required = True
+            if not replan_required:
+                break
+            feedback.extend(json.loads(json.dumps(record)) for record in plan_critiques)
+        else:
+            raise RuntimeError("Exceeded maximum replanning attempts without approval")
+
         safety_audit: List[SafetyDecision] = []
         if self.gatekeeper is not None:
             safety_audit = enforce_plan_safety(plans, self.tools, self.gatekeeper)
-        for plan in plans:
-            self._emit(
-                "orchestrator.plan_ready",
-                run_id=run_id,
-                plan_id=plan.id,
-                step_count=len(plan.steps),
-            )
-            critique = await self.critic.check(_plan_to_dict(plan))
-            if critique.get("status") != "PASS":
-                raise RuntimeError(f"Plan {plan.id} rejected: {critique}")
 
         tool_results: List[ToolResult] = []
         plan_results: Dict[str, List[ToolResult]] = {}
-        memory_entries: List[Dict[str, Any]] = []
         for plan in plans:
             per_plan_results: List[ToolResult] = []
             plan_results[plan.id] = per_plan_results
@@ -116,6 +148,7 @@ class Orchestrator:
             tool_results=tool_results,
             belief_updates=updates,
             safety_audit=safety_audit,
+            critiques=critiques,
         )
         manifest.write(run_dir / "manifest.json")
         RunManifest.write_schema(run_dir / "manifest.schema.json")
@@ -146,6 +179,42 @@ def _plan_to_dict(plan: Plan) -> Dict[str, Any]:
         "risks": plan.risks,
         "ablations": plan.ablations,
     }
+
+
+def _normalise_critique(plan_id: str, critique: Mapping[str, Any]) -> Dict[str, Any]:
+    record: Dict[str, Any] = {
+        "plan_id": plan_id,
+        "status": str(critique.get("status", "FAIL")).upper(),
+        "reviewer": str(critique.get("reviewer", "critic")),
+    }
+    for key in ("notes", "summary"):
+        value = critique.get(key)
+        if value:
+            record[key] = str(value)
+    amendments = critique.get("amendments")
+    if amendments:
+        record["amendments"] = [str(item) for item in amendments]
+    issues = critique.get("issues")
+    if issues:
+        record["issues"] = [str(item) for item in issues]
+    return record
+
+
+def _critique_memory_record(
+    critique: Mapping[str, Any], *, default_time: str
+) -> Dict[str, Any]:
+    entry: Dict[str, Any] = {
+        "type": "critique",
+        "tool": critique.get("reviewer", "critic"),
+        "time": default_time,
+        "plan_id": critique.get("plan_id"),
+        "status": critique.get("status"),
+    }
+    for key in ("notes", "summary", "amendments", "issues"):
+        value = critique.get(key)
+        if value:
+            entry[key] = value
+    return entry
 
 
 async def _execute_plan_steps(
