@@ -10,6 +10,7 @@ from .manifest import RunManifest
 from .memory import MemoryStore
 from .planner import Planner
 from .safety import SafetyDecision, enforce_plan_safety
+from .telemetry import Telemetry
 from .types import BranchCondition, Plan, PlanStep, Report, RunContext, ToolResult
 from .world_model import WorldModel
 from ..governance.gatekeeper import Gatekeeper
@@ -24,10 +25,16 @@ class Orchestrator:
     world_model: WorldModel
     gatekeeper: Gatekeeper | None = None
     working_dir: Path = Path("artifacts")
+    telemetry: Telemetry | None = None
+
+    def _emit(self, event: str, **payload: Any) -> None:
+        if self.telemetry is not None:
+            self.telemetry.emit(event, **payload)
 
     async def run(self, goal_spec: Dict[str, Any], constraints: Dict[str, Any] | None = None) -> Report:
         constraints = constraints or {}
         run_id = uuid.uuid4().hex
+        self._emit("orchestrator.run_started", run_id=run_id, goal=goal_spec.get("goal"))
         run_dir = self.working_dir / f"run_{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -37,6 +44,12 @@ class Orchestrator:
         if self.gatekeeper is not None:
             safety_audit = enforce_plan_safety(plans, self.tools, self.gatekeeper)
         for plan in plans:
+            self._emit(
+                "orchestrator.plan_ready",
+                run_id=run_id,
+                plan_id=plan.id,
+                step_count=len(plan.steps),
+            )
             critique = await self.critic.check(_plan_to_dict(plan))
             if critique.get("status") != "PASS":
                 raise RuntimeError(f"Plan {plan.id} rejected: {critique}")
@@ -59,6 +72,7 @@ class Orchestrator:
                 all_results=tool_results,
                 memory_entries=memory_entries,
                 result_index=result_index,
+                run_id=run_id,
             )
 
         for entry in memory_entries:
@@ -87,6 +101,13 @@ class Orchestrator:
                 )
 
         updates = self.world_model.update(update_payloads)
+        for belief in updates:
+            self._emit(
+                "orchestrator.belief_updated",
+                run_id=run_id,
+                claim_id=belief.claim_id,
+                credence=belief.credence,
+            )
 
         manifest = RunManifest.build(
             run_id=run_id,
@@ -99,12 +120,19 @@ class Orchestrator:
         manifest.write(run_dir / "manifest.json")
         RunManifest.write_schema(run_dir / "manifest.schema.json")
 
+        success = all(result.ok for result in tool_results) if tool_results else True
         report = Report(
             goal=goal_spec.get("goal", ""),
             summary="Completed run",
             key_findings=[result.stdout or "" for result in tool_results],
             belief_deltas=updates,
             artifacts=[_safe_relpath(run_dir)],
+        )
+        self._emit(
+            "orchestrator.run_completed",
+            run_id=run_id,
+            success=success,
+            tool_invocations=len(tool_results),
         )
         return report
 
@@ -132,6 +160,7 @@ async def _execute_plan_steps(
     all_results: List[ToolResult],
     memory_entries: List[Dict[str, Any]],
     result_index: Dict[str, ToolResult],
+    run_id: str,
 ) -> None:
     for step in steps:
         await _execute_plan_step(
@@ -145,6 +174,7 @@ async def _execute_plan_steps(
             all_results=all_results,
             memory_entries=memory_entries,
             result_index=result_index,
+            run_id=run_id,
         )
 
 
@@ -160,6 +190,7 @@ async def _execute_plan_step(
     all_results: List[ToolResult],
     memory_entries: List[Dict[str, Any]],
     result_index: Dict[str, ToolResult],
+    run_id: str,
 ) -> None:
     if step.tool:
         tool = orchestrator.tools.get(step.tool)
@@ -172,10 +203,26 @@ async def _execute_plan_step(
             network=constraints.get("network", "off"),
             record_provenance=True,
         )
+        orchestrator._emit(
+            "orchestrator.tool_started",
+            run_id=run_id,
+            plan_id=plan.id,
+            step_id=step.id,
+            tool=step.tool,
+        )
         result = await tool.run({**step.args, "id": step.id}, ctx)
         per_plan_results.append(result)
         all_results.append(result)
         result_index[result.call_id] = result
+        orchestrator._emit(
+            "orchestrator.tool_completed",
+            run_id=run_id,
+            plan_id=plan.id,
+            step_id=step.id,
+            tool=step.tool,
+            ok=result.ok,
+            wall_time_ms=result.wall_time_ms,
+        )
         memory_entries.append(
             {
                 "type": "episode",
@@ -201,6 +248,7 @@ async def _execute_plan_step(
             all_results=all_results,
             memory_entries=memory_entries,
             result_index=result_index,
+            run_id=run_id,
         )
 
     for branch in step.branches:
@@ -216,6 +264,7 @@ async def _execute_plan_step(
                 all_results=all_results,
                 memory_entries=memory_entries,
                 result_index=result_index,
+                run_id=run_id,
             )
 
 

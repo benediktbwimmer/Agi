@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, List
 
+from .telemetry import Telemetry
+
 
 def _normalise_time(ts: str) -> datetime:
     ts = ts.replace("Z", "+00:00")
@@ -24,6 +26,7 @@ def _hash_source(source: Dict[str, Any]) -> str:
 @dataclass
 class MemoryStore:
     path: Path
+    telemetry: Telemetry | None = None
     _lock: Lock = field(default_factory=Lock, init=False)
     _claim_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
     _time_keys: List[datetime] = field(default_factory=list, init=False)
@@ -50,6 +53,15 @@ class MemoryStore:
                 f.flush()
                 os.fsync(f.fileno())
         self._index_record(record)
+        if self.telemetry is not None:
+            payload = {
+                "record_type": record.get("type"),
+                "tool": record.get("tool"),
+                "plan_id": record.get("plan_id"),
+                "call_id": record.get("call_id"),
+                "path": str(self.path),
+            }
+            self.telemetry.emit("memory.append", **{k: v for k, v in payload.items() if v is not None})
 
     def query_by_claim(self, claim_id: str) -> List[Dict[str, Any]]:
         return [json.loads(json.dumps(r)) for r in self._claim_index.get(claim_id, [])]
