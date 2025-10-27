@@ -11,6 +11,7 @@ from .manifest import RunManifest
 from .memory import MemoryStore
 from .planner import Planner
 from .safety import SafetyDecision, enforce_plan_safety
+from .tools import describe_tool
 from .telemetry import Telemetry
 from .types import BranchCondition, Plan, PlanStep, Report, RunContext, ToolResult
 from .world_model import WorldModel
@@ -39,6 +40,11 @@ class Orchestrator:
         self._emit("orchestrator.run_started", run_id=run_id, goal=goal_spec.get("goal"))
         run_dir = self.working_dir / f"run_{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
+
+        tool_catalog = [
+            describe_tool(tool, override_name=name)
+            for name, tool in sorted(self.tools.items(), key=lambda item: item[0])
+        ]
 
         hypotheses = goal_spec.get("hypotheses", [])
         feedback: List[Dict[str, Any]] = []
@@ -186,6 +192,7 @@ class Orchestrator:
             belief_updates=updates,
             safety_audit=safety_audit,
             critiques=critiques,
+            tool_catalog=tool_catalog,
         )
         manifest.write(run_dir / "manifest.json")
         RunManifest.write_schema(run_dir / "manifest.schema.json")

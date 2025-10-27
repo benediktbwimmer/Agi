@@ -15,9 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 from .safety import SafetyDecision
+from .tools import ToolSpec
 from .types import Belief, ToolResult
 
 
@@ -79,6 +80,34 @@ class ManifestCritique(BaseModel):
     issues: Sequence[str] | None = None
 
 
+class ManifestToolParameter(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str
+    description: str
+    required: bool = True
+    schema_: dict[str, Any] = Field(default_factory=dict, alias="schema")
+
+
+class ManifestToolCapability(BaseModel):
+    name: str
+    description: str
+    safety_tier: str
+    parameters: Sequence[ManifestToolParameter] = Field(default_factory=list)
+    outputs: Sequence[str] = Field(default_factory=list)
+
+
+class ManifestToolSpec(BaseModel):
+    name: str
+    description: str
+    safety_tier: str
+    version: str | None = None
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
+    capabilities: Sequence[ManifestToolCapability] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class RunManifest(BaseModel):
     """Versioned manifest describing an orchestrator execution."""
 
@@ -91,6 +120,7 @@ class RunManifest(BaseModel):
     belief_updates: Sequence[ManifestBeliefUpdate]
     safety_audit: Sequence[ManifestSafetyDecision] = Field(default_factory=list)
     critiques: Sequence[ManifestCritique] = Field(default_factory=list)
+    tool_catalog: Sequence[ManifestToolSpec] = Field(default_factory=list)
 
     @field_validator("created_at")
     @classmethod
@@ -114,6 +144,7 @@ class RunManifest(BaseModel):
         belief_updates: Iterable[Belief],
         safety_audit: Iterable[SafetyDecision],
         critiques: Iterable[Mapping[str, Any]] | None = None,
+        tool_catalog: Iterable[ToolSpec] | Iterable[Mapping[str, Any]] | None = None,
     ) -> "RunManifest":
         """Construct a manifest from runtime dataclasses."""
 
@@ -139,6 +170,7 @@ class RunManifest(BaseModel):
             belief_updates=_normalise(belief_updates),
             safety_audit=_normalise(safety_audit),
             critiques=_normalise(critiques or []),
+            tool_catalog=_normalise(tool_catalog or []),
         )
         return manifest
 
@@ -162,6 +194,9 @@ __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "ManifestBeliefUpdate",
     "ManifestCritique",
+    "ManifestToolCapability",
+    "ManifestToolParameter",
+    "ManifestToolSpec",
     "ManifestSafetyDecision",
     "ManifestSource",
     "ManifestToolResult",
