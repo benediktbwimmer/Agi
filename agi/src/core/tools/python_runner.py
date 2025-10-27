@@ -9,7 +9,7 @@ import textwrap
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from ..types import RunContext, Source, ToolResult
 
