@@ -13,7 +13,10 @@ def _tracked_files() -> list[Path]:
 
 
 def test_repository_contains_no_merge_conflicts() -> None:
-    conflict_markers = ("<<<<<<<", "=======", ">>>>>>>")
+    start_marker = "<" * 7
+    mid_marker = "=" * 7
+    end_marker = ">" * 7
+    conflict_markers = (start_marker, mid_marker, end_marker)
     offenders: list[Path] = []
     for path in _tracked_files():
         # Binary files may raise decoding errors; ignore them quietly.
