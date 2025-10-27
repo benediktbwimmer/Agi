@@ -218,3 +218,105 @@ def test_orchestrator_executes_hierarchical_plan(tmp_path):
 
     episodes = memory.query_by_tool("finisher")
     assert episodes and episodes[-1]["call_id"] == "success"
+
+
+def test_orchestrator_replans_with_critic_feedback(tmp_path):
+    planner_payloads: list[Dict[str, Any]] = []
+
+    class RevisingLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, payload: Dict[str, Any]) -> str:  # pragma: no cover - exercised indirectly
+            planner_payloads.append(payload)
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    {
+                        "plans": [
+                            {
+                                "id": "plan-risky",
+                                "claim_ids": ["claim-risk"],
+                                "steps": [
+                                    {
+                                        "id": "risky-step",
+                                        "tool": "risky",
+                                        "args": {},
+                                    }
+                                ],
+                                "expected_cost": {},
+                                "risks": [],
+                                "ablations": [],
+                            }
+                        ]
+                    }
+                )
+            return json.dumps(
+                {
+                    "plans": [
+                        {
+                            "id": "plan-safe",
+                            "claim_ids": ["claim-risk"],
+                            "steps": [
+                                {
+                                    "id": "safe-step",
+                                    "tool": "safe",
+                                    "args": {},
+                                }
+                            ],
+                            "expected_cost": {},
+                            "risks": [],
+                            "ablations": [],
+                        }
+                    ]
+                }
+            )
+
+    planner = Planner(llm=RevisingLLM())
+    critic_responses = iter(
+        [
+            json.dumps(
+                {
+                    "status": "REVISION",
+                    "notes": "Prefer the safe tool",
+                    "amendments": ["replace risky"],
+                    "issues": ["safety"],
+                }
+            ),
+            json.dumps({"status": "PASS"}),
+        ]
+    )
+    critic = Critic(llm=lambda plan: next(critic_responses))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    world_model = WorldModel()
+
+    class SafeTool(StubTool):
+        async def run(self, args: Dict[str, Any], ctx: Any):  # pragma: no cover - exercised via orchestrator
+            return await super().run(args, ctx)
+
+    tools = {"safe": SafeTool(ok=True), "risky": StubTool(ok=True)}
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools=tools,
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+        max_replans=3,
+    )
+
+    report = asyncio.run(orchestrator.run({"goal": "safe"}, {}))
+
+    assert report.summary == "Completed run"
+    assert len(planner_payloads) == 2
+    assert planner_payloads[1]["feedback"][0]["plan_id"] == "plan-risky"
+    assert planner_payloads[1]["feedback"][0]["status"] == "REVISION"
+
+    critique_records = memory.query_by_tool("critic")
+    assert critique_records and critique_records[-1]["status"] == "REVISION"
+    assert "replace risky" in critique_records[-1]["amendments"]
+
+    manifest_path = next(tmp_path.glob("run_*/manifest.json"))
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["critiques"][0]["plan_id"] == "plan-risky"
+    assert manifest["critiques"][0]["status"] == "REVISION"

@@ -79,6 +79,7 @@ def test_run_manifest_matches_schema(tmp_path):
     assert manifest.goal["goal"] == "demo"
     assert manifest.tool_results[0].call_id == "step-1"
     assert manifest.belief_updates[0].claim_id == "claim-1"
+    assert manifest.critiques == []
 
     created = manifest.created_at
     assert created.endswith("+00:00"), "timestamp should include timezone"
