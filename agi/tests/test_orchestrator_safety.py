@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agi.src.core.critic import Critic
-from agi.src.core.memory import MemoryStore
+from agi.src.core.memory import MemoryStore, WorkingMemory
 from agi.src.core.orchestrator import Orchestrator
 from agi.src.core.planner import Planner
 from agi.src.core.types import Plan, ToolCall, ToolResult, RunContext
@@ -40,6 +40,10 @@ def _memory(tmp_path: Path) -> MemoryStore:
     return MemoryStore(tmp_path / "memory.jsonl")
 
 
+def _working_memory() -> WorkingMemory:
+    return WorkingMemory()
+
+
 def _world_model() -> WorldModel:
     return WorldModel()
 
@@ -68,7 +72,8 @@ def test_orchestrator_denies_disallowed_tier(tmp_path: Path) -> None:
         planner=planner,
         critic=_critic(),
         tools={"dummy": DummyTool()},
-        memory=_memory(tmp_path),
+        episodic_memory=_memory(tmp_path),
+        working_memory=_working_memory(),
         world_model=_world_model(),
         gatekeeper=Gatekeeper(policy={}),
         working_dir=tmp_path,
@@ -84,7 +89,8 @@ def test_orchestrator_records_safety_audit(tmp_path: Path) -> None:
         planner=planner,
         critic=_critic(),
         tools={"dummy": DummyTool()},
-        memory=_memory(tmp_path),
+        episodic_memory=_memory(tmp_path),
+        working_memory=_working_memory(),
         world_model=_world_model(),
         gatekeeper=Gatekeeper(policy={}),
         working_dir=tmp_path,

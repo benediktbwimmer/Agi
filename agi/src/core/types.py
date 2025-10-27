@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from .memory import MemoryStore
 
 UID = str
 
@@ -93,3 +97,18 @@ class RunContext:
     env_whitelist: List[str]
     network: str
     record_provenance: bool
+    working_memory: List[Dict[str, Any]] = field(default_factory=list)
+    episodic_memory: "MemoryStore | None" = None
+
+    def recall_from_episodic(
+        self, *, tool: Optional[str] = None, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        if not self.episodic_memory:
+            return []
+        if tool:
+            records = self.episodic_memory.query_by_tool(tool)
+        else:
+            records = self.episodic_memory.recent(limit)
+        if limit >= 0:
+            records = records[-limit:]
+        return [copy.deepcopy(record) for record in records]

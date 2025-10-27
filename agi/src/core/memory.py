@@ -8,7 +8,9 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
+
+import copy
 
 
 def _normalise_time(ts: str) -> datetime:
@@ -70,6 +72,14 @@ class MemoryStore:
     def query_by_source_hash(self, digest: str) -> List[Dict[str, Any]]:
         return [json.loads(json.dumps(r)) for r in self._source_index.get(digest, [])]
 
+    def recent(self, limit: int = 5) -> List[Dict[str, Any]]:
+        if limit <= 0:
+            return []
+        return [
+            json.loads(json.dumps(record))
+            for record in self._time_records[-limit:]
+        ]
+
     def _index_record(self, record: Dict[str, Any]) -> None:
         if "time" in record:
             try:
@@ -106,3 +116,52 @@ class MemoryStore:
                 if isinstance(source, dict):
                     digest = _hash_source(source)
                     self._source_index.setdefault(digest, []).append(record)
+
+
+@dataclass
+class WorkingMemory:
+    """A lightweight, per-run cache of recent episodes."""
+
+    capacity_per_tool: int = 5
+    capacity_global: int = 20
+    _episodes_by_tool: Dict[Optional[str], List[Dict[str, Any]]] = field(
+        default_factory=dict, init=False
+    )
+    _seen_call_ids: set[str] = field(default_factory=set, init=False)
+
+    def reset(self) -> None:
+        self._episodes_by_tool.clear()
+        self._seen_call_ids.clear()
+
+    def hydrate(self, episodes: Iterable[Dict[str, Any]]) -> None:
+        for episode in episodes:
+            self.add_episode(episode)
+
+    def add_episode(self, episode: Dict[str, Any]) -> None:
+        tool = episode.get("tool")
+        call_id = episode.get("call_id")
+        if call_id and call_id in self._seen_call_ids:
+            return
+        if call_id:
+            self._seen_call_ids.add(call_id)
+
+        bucket = self._episodes_by_tool.setdefault(tool, [])
+        bucket.append(copy.deepcopy(episode))
+        if len(bucket) > self.capacity_per_tool:
+            del bucket[0 : len(bucket) - self.capacity_per_tool]
+
+        global_bucket = self._episodes_by_tool.setdefault(None, [])
+        global_bucket.append(copy.deepcopy(episode))
+        if len(global_bucket) > self.capacity_global:
+            del global_bucket[0 : len(global_bucket) - self.capacity_global]
+
+    def recall(self, tool: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        bucket = self._episodes_by_tool.get(tool)
+        if not bucket:
+            bucket = self._episodes_by_tool.get(None, [])
+        if limit is not None and limit >= 0:
+            bucket = bucket[-limit:]
+        return [copy.deepcopy(ep) for ep in bucket]
+
+    def snapshot(self) -> Dict[Optional[str], List[Dict[str, Any]]]:
+        return {key: [copy.deepcopy(ep) for ep in episodes] for key, episodes in self._episodes_by_tool.items()}
