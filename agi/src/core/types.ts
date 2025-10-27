@@ -25,7 +25,7 @@ export type ToolCall = {
   id: UID;
   tool: string;
   args: Record<string, any>;
-  safety_level: "T0" | "T1" | "T2";
+  safety_level: "T0" | "T1" | "T2" | "T3";
 };
 
 export type ToolResult = {
@@ -39,10 +39,34 @@ export type ToolResult = {
   provenance: Source[];
 };
 
+export type BranchCondition =
+  | string
+  | {
+      when?: "always" | "never" | "success" | "failure" | "stdout_contains" | string;
+      step?: UID;
+      value?: string;
+    };
+
+export type PlanStep = {
+  id: UID;
+  tool?: string;
+  args?: Record<string, any>;
+  safety_level?: "T0" | "T1" | "T2" | "T3";
+  description?: string;
+  goal?: string;
+  sub_steps?: PlanStep[];
+  branches?: PlanBranch[];
+};
+
+export type PlanBranch = {
+  condition?: BranchCondition;
+  steps: PlanStep[];
+};
+
 export type Plan = {
   id: UID;
   claim_ids: UID[];
-  steps: ToolCall[];
+  steps: PlanStep[];
   expected_cost: { tokens?: number; time_s?: number };
   risks: string[];
   ablations: string[];

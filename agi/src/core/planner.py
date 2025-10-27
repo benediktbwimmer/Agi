@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List
 
-from .types import Plan, Prediction, Claim, ToolCall
+from .types import BranchCondition, Plan, PlanBranch, PlanStep, Prediction, Claim
 
 
 class PlannerError(RuntimeError):
@@ -32,20 +32,34 @@ class Planner:
 
 
 def _parse_plan(data: Dict[str, Any]) -> Plan:
-    steps = [
-        ToolCall(
-            id=step["id"],
-            tool=step["tool"],
-            args=step.get("args", {}),
-            safety_level=step.get("safety_level", "T0"),
-        )
-        for step in data.get("steps", [])
-    ]
     return Plan(
         id=data["id"],
         claim_ids=list(data.get("claim_ids", [])),
-        steps=steps,
+        steps=[_parse_plan_step(step) for step in data.get("steps", [])],
         expected_cost=data.get("expected_cost", {}),
         risks=list(data.get("risks", [])),
         ablations=list(data.get("ablations", [])),
+    )
+
+
+def _parse_plan_step(data: Dict[str, Any]) -> PlanStep:
+    sub_steps = [_parse_plan_step(step) for step in data.get("sub_steps", [])]
+    branches = [_parse_plan_branch(branch) for branch in data.get("branches", [])]
+    tool = data.get("tool")
+    return PlanStep(
+        id=data["id"],
+        tool=tool,
+        args=data.get("args", {}),
+        safety_level=data.get("safety_level", "T0"),
+        description=data.get("description"),
+        goal=data.get("goal"),
+        sub_steps=sub_steps,
+        branches=branches,
+    )
+
+
+def _parse_plan_branch(data: Dict[str, Any]) -> PlanBranch:
+    return PlanBranch(
+        condition=BranchCondition.from_raw(data.get("condition")),
+        steps=[_parse_plan_step(step) for step in data.get("steps", [])],
     )

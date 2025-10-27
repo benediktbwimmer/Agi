@@ -10,7 +10,7 @@ from .manifest import RunManifest
 from .memory import MemoryStore
 from .planner import Planner
 from .safety import SafetyDecision, enforce_plan_safety
-from .types import Belief, Plan, Report, RunContext, Source, ToolResult
+from .types import BranchCondition, Plan, PlanStep, Report, RunContext, ToolResult
 from .world_model import WorldModel
 from ..governance.gatekeeper import Gatekeeper
 
@@ -44,36 +44,22 @@ class Orchestrator:
         tool_results: List[ToolResult] = []
         plan_results: Dict[str, List[ToolResult]] = {}
         memory_entries: List[Dict[str, Any]] = []
-
         for plan in plans:
             per_plan_results: List[ToolResult] = []
             plan_results[plan.id] = per_plan_results
-            for step in plan.steps:
-                tool = self.tools.get(step.tool)
-                if tool is None:
-                    raise KeyError(f"Unknown tool {step.tool}")
-                ctx = RunContext(
-                    working_dir=str(run_dir),
-                    timeout_s=int(constraints.get("timeout_s", goal_spec.get("timeout_s", 60))),
-                    env_whitelist=list(goal_spec.get("env", [])),
-                    network=constraints.get("network", "off"),
-                    record_provenance=True,
-                )
-                result = await tool.run({**step.args, "id": step.id}, ctx)
-                per_plan_results.append(result)
-                tool_results.append(result)
-                memory_entries.append(
-                    {
-                        "type": "episode",
-                        "plan_id": plan.id,
-                        "tool": step.tool,
-                        "call_id": result.call_id,
-                        "ok": result.ok,
-                        "stdout": result.stdout,
-                        "time": goal_spec.get("time", "1970-01-01T00:00:00+00:00"),
-                        "provenance": [asdict(src) for src in result.provenance],
-                    }
-                )
+            result_index: Dict[str, ToolResult] = {}
+            await _execute_plan_steps(
+                orchestrator=self,
+                plan=plan,
+                steps=plan.steps,
+                goal_spec=goal_spec,
+                constraints=constraints,
+                run_dir=run_dir,
+                per_plan_results=per_plan_results,
+                all_results=tool_results,
+                memory_entries=memory_entries,
+                result_index=result_index,
+            )
 
         for entry in memory_entries:
             self.memory.append(entry)
@@ -127,19 +113,141 @@ def _plan_to_dict(plan: Plan) -> Dict[str, Any]:
     return {
         "id": plan.id,
         "claim_ids": plan.claim_ids,
-        "steps": [
-            {
-                "id": step.id,
-                "tool": step.tool,
-                "args": step.args,
-                "safety_level": step.safety_level,
-            }
-            for step in plan.steps
-        ],
+        "steps": [_plan_step_to_dict(step) for step in plan.steps],
         "expected_cost": plan.expected_cost,
         "risks": plan.risks,
         "ablations": plan.ablations,
     }
+
+
+async def _execute_plan_steps(
+    *,
+    orchestrator: "Orchestrator",
+    plan: Plan,
+    steps: Iterable[PlanStep],
+    goal_spec: Dict[str, Any],
+    constraints: Dict[str, Any],
+    run_dir: Path,
+    per_plan_results: List[ToolResult],
+    all_results: List[ToolResult],
+    memory_entries: List[Dict[str, Any]],
+    result_index: Dict[str, ToolResult],
+) -> None:
+    for step in steps:
+        await _execute_plan_step(
+            orchestrator=orchestrator,
+            plan=plan,
+            step=step,
+            goal_spec=goal_spec,
+            constraints=constraints,
+            run_dir=run_dir,
+            per_plan_results=per_plan_results,
+            all_results=all_results,
+            memory_entries=memory_entries,
+            result_index=result_index,
+        )
+
+
+async def _execute_plan_step(
+    *,
+    orchestrator: "Orchestrator",
+    plan: Plan,
+    step: PlanStep,
+    goal_spec: Dict[str, Any],
+    constraints: Dict[str, Any],
+    run_dir: Path,
+    per_plan_results: List[ToolResult],
+    all_results: List[ToolResult],
+    memory_entries: List[Dict[str, Any]],
+    result_index: Dict[str, ToolResult],
+) -> None:
+    if step.tool:
+        tool = orchestrator.tools.get(step.tool)
+        if tool is None:
+            raise KeyError(f"Unknown tool {step.tool}")
+        ctx = RunContext(
+            working_dir=str(run_dir),
+            timeout_s=int(constraints.get("timeout_s", goal_spec.get("timeout_s", 60))),
+            env_whitelist=list(goal_spec.get("env", [])),
+            network=constraints.get("network", "off"),
+            record_provenance=True,
+        )
+        result = await tool.run({**step.args, "id": step.id}, ctx)
+        per_plan_results.append(result)
+        all_results.append(result)
+        result_index[result.call_id] = result
+        memory_entries.append(
+            {
+                "type": "episode",
+                "plan_id": plan.id,
+                "tool": step.tool,
+                "call_id": result.call_id,
+                "ok": result.ok,
+                "stdout": result.stdout,
+                "time": goal_spec.get("time", "1970-01-01T00:00:00+00:00"),
+                "provenance": [asdict(src) for src in result.provenance],
+            }
+        )
+
+    if step.sub_steps:
+        await _execute_plan_steps(
+            orchestrator=orchestrator,
+            plan=plan,
+            steps=step.sub_steps,
+            goal_spec=goal_spec,
+            constraints=constraints,
+            run_dir=run_dir,
+            per_plan_results=per_plan_results,
+            all_results=all_results,
+            memory_entries=memory_entries,
+            result_index=result_index,
+        )
+
+    for branch in step.branches:
+        if _should_execute_branch(branch.condition, result_index):
+            await _execute_plan_steps(
+                orchestrator=orchestrator,
+                plan=plan,
+                steps=branch.steps,
+                goal_spec=goal_spec,
+                constraints=constraints,
+                run_dir=run_dir,
+                per_plan_results=per_plan_results,
+                all_results=all_results,
+                memory_entries=memory_entries,
+                result_index=result_index,
+            )
+
+
+def _should_execute_branch(
+    condition: BranchCondition, results: Mapping[str, ToolResult]
+) -> bool:
+    return condition.evaluate(results)
+
+
+def _plan_step_to_dict(step: PlanStep) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "id": step.id,
+        "args": step.args,
+        "safety_level": step.safety_level,
+    }
+    if step.tool is not None:
+        payload["tool"] = step.tool
+    if step.description is not None:
+        payload["description"] = step.description
+    if step.goal is not None:
+        payload["goal"] = step.goal
+    if step.sub_steps:
+        payload["sub_steps"] = [_plan_step_to_dict(child) for child in step.sub_steps]
+    if step.branches:
+        payload["branches"] = [
+            {
+                "condition": branch.condition.to_payload(),
+                "steps": [_plan_step_to_dict(child) for child in branch.steps],
+            }
+            for branch in step.branches
+        ]
+    return payload
 
 
 def _safe_relpath(path: Path) -> str:

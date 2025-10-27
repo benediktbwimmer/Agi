@@ -17,8 +17,10 @@ class StubTool:
     def __init__(self, ok: bool) -> None:
         self.ok = ok
         self.safety = "T0"
+        self.invocations: list[str] = []
 
     async def run(self, args: Dict[str, Any], ctx: Any):  # pragma: no cover - exercised via orchestrator
+        self.invocations.append(args.get("id", "call"))
         return ToolResult(
             call_id=args.get("id", "call"),
             ok=self.ok,
@@ -136,3 +138,83 @@ def test_orchestrator_updates_all_claims(tmp_path):
         "claim-2",
     ]
     assert set(orchestrator.world_model.beliefs.keys()) == {"claim-1", "claim-2"}
+
+
+def test_orchestrator_executes_hierarchical_plan(tmp_path):
+    planner_response = {
+        "plans": [
+            {
+                "id": "plan-hier",
+                "claim_ids": ["claim-hier"],
+                "steps": [
+                    {
+                        "id": "root",
+                        "tool": "setup",
+                        "args": {},
+                        "sub_steps": [
+                            {
+                                "id": "child",
+                                "tool": "worker",
+                                "args": {},
+                            }
+                        ],
+                        "branches": [
+                            {
+                                "condition": "on_success(root)",
+                                "steps": [
+                                    {
+                                        "id": "success",
+                                        "tool": "finisher",
+                                        "args": {},
+                                    }
+                                ],
+                            },
+                            {
+                                "condition": "on_failure(root)",
+                                "steps": [
+                                    {
+                                        "id": "failure",
+                                        "tool": "fallback",
+                                        "args": {},
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+                "expected_cost": {},
+                "risks": [],
+                "ablations": [],
+            }
+        ]
+    }
+
+    planner = Planner(llm=lambda payload: json.dumps(planner_response))
+    critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    world_model = WorldModel()
+    tools = {
+        "setup": StubTool(ok=True),
+        "worker": StubTool(ok=True),
+        "finisher": StubTool(ok=True),
+        "fallback": StubTool(ok=False),
+    }
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools=tools,
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+    )
+
+    report = asyncio.run(orchestrator.run({"goal": "hier"}, {}))
+
+    assert report.summary == "Completed run"
+    assert tools["setup"].invocations == ["root"]
+    assert tools["worker"].invocations == ["child"]
+    assert tools["finisher"].invocations == ["success"]
+    assert tools["fallback"].invocations == []
+
+    episodes = memory.query_by_tool("finisher")
+    assert episodes and episodes[-1]["call_id"] == "success"
