@@ -4,7 +4,7 @@ import json
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping
+from typing import Any, Dict, Iterable, List, Mapping, Set
 
 from .critic import Critic
 from .manifest import RunManifest
@@ -45,6 +45,10 @@ class Orchestrator:
         critiques: List[Dict[str, Any]] = []
         memory_entries: List[Dict[str, Any]] = []
         plans: List[Plan] = []
+        tool_results: List[ToolResult] = []
+        plan_results: Dict[str, List[ToolResult]] = {}
+        safety_audit: List[SafetyDecision] = []
+
         for attempt in range(self.max_replans + 1):
             plans = await self.planner.plan_from(hypotheses, feedback=feedback)
             plan_critiques: List[Dict[str, Any]] = []
@@ -77,34 +81,67 @@ class Orchestrator:
                     raise RuntimeError(f"Plan {plan.id} rejected: {critique}")
                 plan_critiques.append(critique_record)
                 replan_required = True
-            if not replan_required:
-                break
-            feedback.extend(json.loads(json.dumps(record)) for record in plan_critiques)
+            if replan_required:
+                feedback.extend(
+                    json.loads(json.dumps(record)) for record in plan_critiques
+                )
+                continue
+
+            if self.gatekeeper is not None:
+                safety_audit = enforce_plan_safety(plans, self.tools, self.gatekeeper)
+
+            attempt_tool_results: List[ToolResult] = []
+            attempt_plan_results: Dict[str, List[ToolResult]] = {}
+            attempt_result_indices: Dict[str, Dict[str, ToolResult]] = {}
+            attempt_memory_entries: List[Dict[str, Any]] = []
+
+            for plan in plans:
+                per_plan_results: List[ToolResult] = []
+                attempt_plan_results[plan.id] = per_plan_results
+                result_index: Dict[str, ToolResult] = {}
+                attempt_result_indices[plan.id] = result_index
+                await _execute_plan_steps(
+                    orchestrator=self,
+                    plan=plan,
+                    steps=plan.steps,
+                    goal_spec=goal_spec,
+                    constraints=constraints,
+                    run_dir=run_dir,
+                    per_plan_results=per_plan_results,
+                    all_results=attempt_tool_results,
+                    memory_entries=attempt_memory_entries,
+                    result_index=result_index,
+                    run_id=run_id,
+                )
+
+            memory_entries.extend(attempt_memory_entries)
+
+            plan_failure_map = {
+                plan.id: any(not res.ok for res in attempt_plan_results.get(plan.id, []))
+                for plan in plans
+            }
+            failing_plan_ids = {plan_id for plan_id, failed in plan_failure_map.items() if failed}
+
+            if failing_plan_ids and len(failing_plan_ids) == len(plan_failure_map):
+                execution_feedback = _build_execution_feedback(
+                    plans, attempt_result_indices, failing_plan_ids
+                )
+                for item in execution_feedback:
+                    self._emit(
+                        "orchestrator.plan_execution_failed",
+                        run_id=run_id,
+                        plan_id=item["plan_id"],
+                        failure_count=len(item.get("failures", [])),
+                    )
+                feedback.extend(json.loads(json.dumps(item)) for item in execution_feedback)
+                continue
+
+            tool_results = attempt_tool_results
+            plan_results = attempt_plan_results
+            break
         else:
-            raise RuntimeError("Exceeded maximum replanning attempts without approval")
-
-        safety_audit: List[SafetyDecision] = []
-        if self.gatekeeper is not None:
-            safety_audit = enforce_plan_safety(plans, self.tools, self.gatekeeper)
-
-        tool_results: List[ToolResult] = []
-        plan_results: Dict[str, List[ToolResult]] = {}
-        for plan in plans:
-            per_plan_results: List[ToolResult] = []
-            plan_results[plan.id] = per_plan_results
-            result_index: Dict[str, ToolResult] = {}
-            await _execute_plan_steps(
-                orchestrator=self,
-                plan=plan,
-                steps=plan.steps,
-                goal_spec=goal_spec,
-                constraints=constraints,
-                run_dir=run_dir,
-                per_plan_results=per_plan_results,
-                all_results=tool_results,
-                memory_entries=memory_entries,
-                result_index=result_index,
-                run_id=run_id,
+            raise RuntimeError(
+                "Exceeded maximum replanning attempts without approval or execution success"
             )
 
         for entry in memory_entries:
@@ -366,6 +403,40 @@ def _plan_step_to_dict(step: PlanStep) -> Dict[str, Any]:
             for branch in step.branches
         ]
     return payload
+
+
+def _build_execution_feedback(
+    plans: Iterable[Plan],
+    result_indices: Mapping[str, Mapping[str, ToolResult]],
+    failing_plan_ids: Set[str],
+) -> List[Dict[str, Any]]:
+    feedback: List[Dict[str, Any]] = []
+    for plan in plans:
+        if plan.id not in failing_plan_ids:
+            continue
+        plan_failures: List[Dict[str, Any]] = []
+        plan_results = result_indices.get(plan.id, {})
+        for step in plan.iter_tool_calls():
+            result = plan_results.get(step.id)
+            if result is None or result.ok:
+                continue
+            plan_failures.append(
+                {
+                    "step_id": step.id,
+                    "tool": step.tool,
+                    "status": "FAILED",
+                    "stdout": result.stdout,
+                }
+            )
+        if plan_failures:
+            feedback.append(
+                {
+                    "plan_id": plan.id,
+                    "status": "FAILED_EXECUTION",
+                    "failures": plan_failures,
+                }
+            )
+    return feedback
 
 
 def _safe_relpath(path: Path) -> str:
