@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .types import BranchCondition, Plan, PlanBranch, PlanStep, Prediction, Claim
 
@@ -20,11 +20,14 @@ class Planner:
         hypotheses: Iterable[Dict[str, Any]],
         *,
         feedback: Iterable[Dict[str, Any]] | None = None,
+        memory_context: Mapping[str, Any] | None = None,
     ) -> List[Plan]:
         payload = {"hypotheses": list(hypotheses)}
         feedback_list = list(feedback or [])
         if feedback_list:
             payload["feedback"] = feedback_list
+        if memory_context:
+            payload["memory_context"] = json.loads(json.dumps(memory_context))
         raw = self.llm(payload)
         try:
             data = json.loads(raw)
