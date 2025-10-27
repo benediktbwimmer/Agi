@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import uuid
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping
+from typing import Any, Dict, Iterable, List, Mapping, Set
 
 from .critic import Critic
-from .memory import MemoryStore
+from .memory import MemoryStore, WorkingMemory
 from .planner import Planner
 from .safety import SafetyDecision, enforce_plan_safety
 from .types import Belief, Plan, Report, RunContext, Source, ToolResult
@@ -20,16 +21,39 @@ class Orchestrator:
     planner: Planner
     critic: Critic
     tools: Mapping[str, Any]
-    memory: MemoryStore
     world_model: WorldModel
     gatekeeper: Gatekeeper | None = None
     working_dir: Path = Path("artifacts")
+    episodic_memory_path: Path = Path("memory.jsonl")
+    episodic_memory: MemoryStore | None = None
+    working_memory: WorkingMemory | None = None
+    enable_memory: bool = True
+
+    def __post_init__(self) -> None:
+        flag = os.getenv("AGI_ENABLE_MEMORY")
+        if flag is not None:
+            self.enable_memory = flag.strip().lower() not in {"0", "false", "no"}
+
+        if self.episodic_memory is None:
+            resolved_path = self.episodic_memory_path
+            if not resolved_path.is_absolute():
+                resolved_path = (self.working_dir / resolved_path).resolve()
+            self.episodic_memory_path = resolved_path
+            self.episodic_memory = MemoryStore(resolved_path)
+
+        if self.working_memory is None:
+            self.working_memory = WorkingMemory()
 
     async def run(self, goal_spec: Dict[str, Any], constraints: Dict[str, Any] | None = None) -> Report:
         constraints = constraints or {}
         run_id = uuid.uuid4().hex
         run_dir = self.working_dir / f"run_{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
+
+        assert self.working_memory is not None
+        assert self.episodic_memory is not None
+        working_memory = self.working_memory
+        episodic_memory = self.episodic_memory
 
         hypotheses = goal_spec.get("hypotheses", [])
         plans = await self.planner.plan_from(hypotheses)
@@ -41,9 +65,12 @@ class Orchestrator:
             if critique.get("status") != "PASS":
                 raise RuntimeError(f"Plan {plan.id} rejected: {critique}")
 
+        if self.enable_memory:
+            working_memory.reset()
+            self._hydrate_working_memory(goal_spec, plans)
+
         tool_results: List[ToolResult] = []
         plan_results: Dict[str, List[ToolResult]] = {}
-        memory_entries: List[Dict[str, Any]] = []
 
         for plan in plans:
             per_plan_results: List[ToolResult] = []
@@ -58,12 +85,16 @@ class Orchestrator:
                     env_whitelist=list(goal_spec.get("env", [])),
                     network=constraints.get("network", "off"),
                     record_provenance=True,
+                    working_memory=working_memory.recall(step.tool)
+                    if self.enable_memory
+                    else [],
+                    episodic_memory=episodic_memory if self.enable_memory else None,
                 )
                 result = await tool.run({**step.args, "id": step.id}, ctx)
                 per_plan_results.append(result)
                 tool_results.append(result)
-                memory_entries.append(
-                    {
+                if self.enable_memory:
+                    episode = {
                         "type": "episode",
                         "plan_id": plan.id,
                         "tool": step.tool,
@@ -72,11 +103,12 @@ class Orchestrator:
                         "stdout": result.stdout,
                         "time": goal_spec.get("time", "1970-01-01T00:00:00+00:00"),
                         "provenance": [asdict(src) for src in result.provenance],
+                        "claim_ids": list(plan.claim_ids),
+                        "goal": goal_spec.get("goal"),
                     }
-                )
-
-        for entry in memory_entries:
-            self.memory.append(entry)
+                    working_memory.add_episode(episode)
+                    if self._is_significant(result):
+                        episodic_memory.append(episode)
 
         update_payloads: List[Dict[str, Any]] = []
         for plan in plans:
@@ -120,6 +152,45 @@ class Orchestrator:
             artifacts=[_safe_relpath(run_dir)],
         )
         return report
+
+    def _hydrate_working_memory(self, goal_spec: Mapping[str, Any], plans: Iterable[Plan]) -> None:
+        assert self.working_memory is not None
+        assert self.episodic_memory is not None
+        episodic_memory = self.episodic_memory
+
+        relevant_tools: Set[str] = set()
+        relevant_claims: Set[str] = set(goal_spec.get("claim_ids", []))
+        for plan in plans:
+            relevant_claims.update(plan.claim_ids)
+            for step in plan.steps:
+                relevant_tools.add(step.tool)
+
+        if not relevant_claims and not relevant_tools:
+            recent = episodic_memory.recent(self.working_memory.capacity_global)
+            self.working_memory.hydrate(recent)
+            return
+
+        for claim_id in sorted(relevant_claims):
+            episodes = episodic_memory.query_by_claim(claim_id)
+            if episodes:
+                self.working_memory.hydrate(
+                    episodes[-self.working_memory.capacity_per_tool :]
+                )
+
+        for tool_name in sorted(relevant_tools):
+            episodes = episodic_memory.query_by_tool(tool_name)
+            if episodes:
+                self.working_memory.hydrate(
+                    episodes[-self.working_memory.capacity_per_tool :]
+                )
+
+    @staticmethod
+    def _is_significant(result: ToolResult) -> bool:
+        if result.ok:
+            return True
+        if result.stdout or result.data:
+            return True
+        return bool(result.provenance)
 
 
 def _plan_to_dict(plan: Plan) -> Dict[str, Any]:

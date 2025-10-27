@@ -69,10 +69,32 @@ export interface Tool {
   run(args: Record<string, any>, ctx: RunContext): Promise<ToolResult>;
 }
 
+export type MemoryEpisode = {
+  tool?: string;
+  call_id?: UID;
+  stdout?: string;
+  summary?: string;
+  goal?: string;
+  time?: string;
+  claim_ids?: UID[];
+  [key: string]: any;
+};
+
+export type EpisodicRecallOptions = {
+  tool?: string;
+  limit?: number;
+  text_query?: string;
+};
+
 export type RunContext = {
   working_dir: string;
   timeout_s: number;
   env_whitelist: string[];
   network: "off" | "read" | "write";
   record_provenance: boolean;
+  working_memory?: MemoryEpisode[];
+  episodic_memory?: unknown;
+  recall_from_episodic?: (
+    options?: EpisodicRecallOptions
+  ) => Promise<MemoryEpisode[]> | MemoryEpisode[];
 };
