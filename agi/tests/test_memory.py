@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agi.src.core.memory import MemoryStore, _hash_source
+from agi.src.core.memory import MemoryStore, WorkingMemory, _hash_source
 from agi.src.core.types import RunContext
 
 
@@ -111,3 +111,35 @@ def test_run_context_recall_filters_by_query(memory_path: Path) -> None:
     filtered = ctx.recall_from_episodic(tool="python_runner", text_query="alpha")
     assert len(filtered) == 1
     assert filtered[0]["call_id"] == "call-1"
+
+
+def test_run_context_recall_zero_limit(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+    store.append(
+        {
+            "type": "episode",
+            "tool": "python_runner",
+            "call_id": "call-1",
+            "stdout": "alpha result",
+            "time": "2024-01-01T00:00:00+00:00",
+        }
+    )
+
+    ctx = RunContext(
+        working_dir="/tmp",
+        timeout_s=5,
+        env_whitelist=[],
+        network="off",
+        record_provenance=True,
+        episodic_memory=store,
+    )
+
+    assert ctx.recall_from_episodic(tool="python_runner", limit=0) == []
+
+
+def test_working_memory_zero_limit() -> None:
+    working_memory = WorkingMemory()
+    working_memory.add_episode({"tool": "python_runner", "call_id": "call-1"})
+    working_memory.add_episode({"tool": "python_runner", "call_id": "call-2"})
+
+    assert working_memory.recall("python_runner", limit=0) == []

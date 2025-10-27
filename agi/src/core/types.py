@@ -111,7 +111,8 @@ class RunContext:
 
         Args:
             tool: When provided, restrict results to the given tool name.
-            limit: Maximum number of records to return. ``-1`` returns all.
+            limit: Maximum number of records to return. ``0`` yields no
+                records, while ``-1`` returns all available entries.
             text_query: Optional case-insensitive substring filter applied to
                 the episode ``stdout``, ``summary``, ``goal`` or ``claim_ids``.
 
@@ -123,14 +124,17 @@ class RunContext:
         if not self.episodic_memory:
             return []
 
+        if limit == 0:
+            return []
+
         if tool:
             records = self.episodic_memory.query_by_tool(tool)
         else:
             if limit < 0:
                 records = self.episodic_memory.all()
             else:
-                size = max(limit, 0)
-                records = self.episodic_memory.recent(size or 5)
+                size = limit if limit > 0 else 5
+                records = self.episodic_memory.recent(size)
 
         if text_query:
             needle = text_query.lower()
@@ -148,7 +152,7 @@ class RunContext:
 
             records = [record for record in records if _matches(record)]
 
-        if limit >= 0:
+        if limit > 0:
             records = records[-limit:]
 
         return [copy.deepcopy(record) for record in records]

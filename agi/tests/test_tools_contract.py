@@ -87,3 +87,35 @@ def test_retrieval_tool_filters_memory(tmp_path: Path) -> None:
     assert result.ok
     assert "alpha" in (result.stdout or "")
     assert "beta" not in (result.stdout or "")
+
+
+def test_retrieval_tool_respects_zero_limit(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.append(
+        {
+            "type": "episode",
+            "tool": "calculator",
+            "call_id": "call-episodic-alpha",
+            "stdout": "alpha found",
+            "time": "2024-01-01T00:00:00+00:00",
+        }
+    )
+
+    ctx = RunContext(
+        working_dir=str(tmp_path),
+        timeout_s=5,
+        env_whitelist=[],
+        network="off",
+        record_provenance=True,
+        working_memory=[],
+        episodic_memory=store,
+    )
+
+    tool = RetrievalTool()
+    result = asyncio.run(
+        tool.run({"query": "alpha", "tool_hint": "calculator", "limit": 0}, ctx)
+    )
+
+    assert result.ok
+    assert "no episodic memory matched query" in (result.stdout or "")
+    assert any(source.ref == "retrieval" for source in result.provenance)

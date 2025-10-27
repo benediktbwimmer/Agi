@@ -63,7 +63,9 @@ class RetrievalTool:
             ]
             unique_episodes.extend(wm_matches)
 
-        if limit >= 0:
+        if limit == 0:
+            unique_episodes = []
+        elif limit > 0:
             unique_episodes = unique_episodes[-limit:]
 
         if unique_episodes:

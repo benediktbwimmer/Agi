@@ -158,12 +158,17 @@ class WorkingMemory:
         if len(global_bucket) > self.capacity_global:
             del global_bucket[0 : len(global_bucket) - self.capacity_global]
 
-    def recall(self, tool: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def recall(
+        self, tool: Optional[str] = None, limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
         bucket = self._episodes_by_tool.get(tool)
         if not bucket:
             bucket = self._episodes_by_tool.get(None, [])
-        if limit is not None and limit >= 0:
-            bucket = bucket[-limit:]
+        if limit is not None:
+            if limit == 0:
+                return []
+            if limit > 0:
+                bucket = bucket[-limit:]
         return [copy.deepcopy(ep) for ep in bucket]
 
     def snapshot(self) -> Dict[Optional[str], List[Dict[str, Any]]]:
