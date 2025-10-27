@@ -65,3 +65,10 @@ significant episodes for future recall when the feature is enabled. Refer to the
 [memory guide](docs/memory.md) for a detailed walkthrough of the execution
 lifecycle, runtime toggles, and targeted tests that validate the behaviour.
 
+## Keeping the branch in sync
+
+The project’s `work` branch is expected to stay rebased on top of `main`.
+Consult the [merge guide](docs/merging.md) for a step-by-step checklist that
+covers stashing local edits, fetching the latest upstream history, resolving
+conflicts, and verifying that the merge guard tests pass.
+
