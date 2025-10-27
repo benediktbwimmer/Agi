@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping
 
 from .critic import Critic
+from .manifest import RunManifest
 from .memory import MemoryStore
 from .planner import Planner
 from .safety import SafetyDecision, enforce_plan_safety
@@ -102,15 +102,16 @@ class Orchestrator:
 
         updates = self.world_model.update(update_payloads)
 
-        manifest = {
-            "run_id": run_id,
-            "goal": goal_spec,
-            "constraints": constraints,
-            "tool_results": [asdict(result) for result in tool_results],
-            "belief_updates": [asdict(b) for b in updates],
-            "safety_audit": [decision.as_dict() for decision in safety_audit],
-        }
-        (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest = RunManifest.build(
+            run_id=run_id,
+            goal=goal_spec,
+            constraints=constraints,
+            tool_results=tool_results,
+            belief_updates=updates,
+            safety_audit=safety_audit,
+        )
+        manifest.write(run_dir / "manifest.json")
+        RunManifest.write_schema(run_dir / "manifest.schema.json")
 
         report = Report(
             goal=goal_spec.get("goal", ""),
