@@ -1,14 +1,17 @@
+"""Shared type definitions for the AGI runtime."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol, TypedDict
 
 
 UID = str
 
 
-@dataclass
-class Prediction:
+class Prediction(TypedDict, total=False):
+    """Prediction metadata attached to a :class:`Claim`."""
+
     id: UID
     metric: str
     expectation: str
@@ -17,6 +20,8 @@ class Prediction:
 
 @dataclass
 class Source:
+    """Provenance information for beliefs and tool outputs."""
+
     kind: str
     ref: str
     note: Optional[str] = None
@@ -24,6 +29,8 @@ class Source:
 
 @dataclass
 class Claim:
+    """A declarative claim the system is attempting to verify."""
+
     id: UID
     text: str
     predictions: List[Prediction]
@@ -33,14 +40,18 @@ class Claim:
 
 @dataclass
 class ToolCall:
+    """Instruction to invoke a tool during a plan."""
+
     id: UID
     tool: str
     args: Dict[str, Any]
-    safety_level: str
+    safety_level: str = "T0"
 
 
 @dataclass
 class ToolResult:
+    """Outcome from executing a tool call."""
+
     call_id: UID
     ok: bool
     cost_tokens: Optional[int] = None
@@ -53,6 +64,8 @@ class ToolResult:
 
 @dataclass
 class Plan:
+    """Structured plan produced by the planner."""
+
     id: UID
     claim_ids: List[UID]
     steps: List[ToolCall]
@@ -63,6 +76,8 @@ class Plan:
 
 @dataclass
 class Belief:
+    """Belief state for a specific claim."""
+
     claim_id: UID
     credence: float
     evidence: List[Source]
@@ -71,6 +86,8 @@ class Belief:
 
 @dataclass
 class Report:
+    """Structured summary returned to callers after orchestration."""
+
     goal: str
     summary: str
     key_findings: List[str]
@@ -78,18 +95,38 @@ class Report:
     artifacts: List[str]
 
 
-class Tool:
+class Tool(Protocol):
+    """Runtime contract for orchestrator tools."""
+
     name: str
     safety: str
 
     async def run(self, args: Dict[str, Any], ctx: "RunContext") -> ToolResult:  # pragma: no cover - interface
-        raise NotImplementedError
+        ...
 
 
 @dataclass
 class RunContext:
+    """Execution context provided to tools during a run."""
+
     working_dir: str
     timeout_s: int
     env_whitelist: List[str]
     network: str
     record_provenance: bool
+
+
+__all__ = [
+    "Belief",
+    "Claim",
+    "Plan",
+    "Prediction",
+    "Report",
+    "RunContext",
+    "Source",
+    "Tool",
+    "ToolCall",
+    "ToolResult",
+    "UID",
+]
+

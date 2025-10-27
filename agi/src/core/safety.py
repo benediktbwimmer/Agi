@@ -97,7 +97,7 @@ def enforce_plan_safety(
             tool_level = getattr(tool, "safety", "T0")
             requested_level = step.safety_level or tool_level
             effective = _max_tier(requested_level, tool_level)
-            approved = gatekeeper.review(effective)
+            approved = gatekeeper.review(effective, tool=step.tool)
             decision = SafetyDecision(
                 plan_id=plan.id,
                 step_id=step.id,

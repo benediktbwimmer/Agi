@@ -1,6 +1,6 @@
-"""Memory primitives for AGI agents."""
+"""Re-export episodic memory models for backwards compatibility."""
 
-from .episodic import (
+from agi.src.agi.memory.episodic import (
     Episode,
     EpisodeEvent,
     EpisodeQuery,
