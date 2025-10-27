@@ -63,6 +63,20 @@ The orchestrator hydrates a short-lived working memory from the persistent
 episodic store before executing a plan so each tool receives relevant context
 from prior runs.
 
+When memory is enabled the orchestration loop proceeds as follows:
+
+1. **Hydrate working memory** – relevant episodic entries are loaded according
+   to the plan's tools and claim IDs.
+2. **Execute plan steps** – each tool invocation receives the working-memory
+   slice aligned with the tool alongside a handle to the episodic store for
+   deeper lookups.
+3. **Commit significant episodes** – successful or information-rich results are
+   appended to episodic memory and mirrored into the working cache for future
+   steps.
+
+This mirrors the behaviour covered by the multi-turn tests under
+`agi/tests/test_orchestrator.py` and `agi/tests/test_tools_contract.py`.
+
 ### Enabling or disabling memory
 
 Set `AGI_ENABLE_MEMORY` to control whether working/episodic memory is engaged:
@@ -79,6 +93,10 @@ When enabled, working memory keeps the most recent episodes per tool and shares
 that context with each tool invocation via the `RunContext`. Tools can also query
 the episodic store directly through `RunContext.recall_from_episodic()` which
 supports simple text filtering.
+
+Leaving the variable unset retains the default (memory enabled). Setting the flag
+to a falsy value skips both working-memory hydration and episodic commits so tool
+invocations operate without prior context.
 
 ### Validating recall behaviour
 
