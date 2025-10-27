@@ -4,6 +4,13 @@ import subprocess
 from pathlib import Path
 
 
+def _git_dir() -> Path:
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-dir"], check=True, capture_output=True, text=True
+    )
+    return Path(result.stdout.strip()).resolve()
+
+
 def _tracked_files() -> list[Path]:
     repo_root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
@@ -47,3 +54,19 @@ def test_worktree_has_no_unmerged_paths() -> None:
         line for line in result.stdout.splitlines() if line and line[0] == "U"
     ]
     assert not conflict_lines, f"unmerged paths detected: {conflict_lines}"
+
+
+def test_repository_not_in_merge_flow() -> None:
+    """Ensure ``.git`` does not contain sentinel merge/rebase state files."""
+
+    git_dir = _git_dir()
+    sentinels = [
+        "MERGE_HEAD",
+        "MERGE_MSG",
+        "REBASE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "BISECT_LOG",
+    ]
+    offenders = [name for name in sentinels if (git_dir / name).exists()]
+    assert not offenders, f"merge/rebase in-progress detected via {offenders}"
