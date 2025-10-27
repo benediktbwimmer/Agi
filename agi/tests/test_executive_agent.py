@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Any, Dict, Mapping
 
 import pytest
 
@@ -88,6 +88,11 @@ def test_executive_agent_enriches_goal(tmp_path: Path) -> None:
     assert hypotheses and hypotheses[0]["id"] == "claim-123"
     assert "belief" in hypotheses[0]
     assert hypotheses[0]["memory"][-1]["tool"] == "calculator"
+    contextual_memory = goal_spec["contextual_memory"]
+    assert contextual_memory
+    assert contextual_memory[0]["source"] == "claim"
+    assert contextual_memory[0]["claim_id"] == "claim-123"
+    assert contextual_memory[0]["stdout"] == "2"
 
     stored = memory.query_by_tool("executive_reflection")
     assert stored and stored[-1]["summary"] == "ok"

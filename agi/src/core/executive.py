@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional
 
 from .memory import MemoryStore
 from .orchestrator import Orchestrator
+from .retrieval import MemoryRetriever
 from .types import Belief, Report
 from .world_model import WorldModel
 
@@ -63,6 +64,11 @@ class ExecutiveAgent:
     memory: MemoryStore
     world_model: WorldModel
     default_constraints: Mapping[str, Any] = field(default_factory=dict)
+    memory_retriever: MemoryRetriever | None = None
+
+    def __post_init__(self) -> None:
+        if self.memory_retriever is None:
+            self.memory_retriever = MemoryRetriever(self.memory)
 
     def build_goal_spec(
         self,
@@ -77,6 +83,13 @@ class ExecutiveAgent:
         claim_ids_list = list(claim_ids or [])
         goal_context = _normalise_context(context)
         hypotheses = self._synthesise_hypotheses(claim_ids_list)
+        contextual_memory: List[Dict[str, Any]] = []
+        if self.memory_retriever is not None:
+            contextual_memory = self.memory_retriever.retrieve(
+                goal=goal,
+                context=goal_context,
+                claim_ids=claim_ids_list,
+            )
         enriched_metadata: Dict[str, Any] = {"generated_at": _now_iso()}
         if metadata:
             enriched_metadata.update(metadata)
@@ -86,6 +99,7 @@ class ExecutiveAgent:
         return {
             "goal": goal,
             "hypotheses": hypotheses,
+            "contextual_memory": contextual_memory,
             "metadata": enriched_metadata,
             "time": enriched_metadata["generated_at"],
             "claim_ids": claim_ids_list,
