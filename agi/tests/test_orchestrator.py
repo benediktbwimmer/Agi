@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
@@ -230,3 +231,55 @@ def test_orchestrator_hydrates_working_memory(tmp_path):
     second_context = seen_contexts[1]["working"]
     call_ids = {ep.get("call_id") for ep in second_context}
     assert {"baseline-call", "step-1"}.issubset(call_ids)
+
+
+def test_orchestrator_instantiates_memory(tmp_path: Path) -> None:
+    planner_response = {
+        "plans": [
+            {
+                "id": "plan-1",
+                "claim_ids": ["claim-1"],
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "tool": "success_tool",
+                        "args": {},
+                        "safety_level": "T0",
+                    }
+                ],
+                "expected_cost": {},
+                "risks": [],
+                "ablations": [],
+            }
+        ]
+    }
+
+    planner = Planner(llm=lambda payload: json.dumps(planner_response))
+    critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools={"success_tool": StubTool(ok=True)},
+        world_model=WorldModel(),
+        working_dir=tmp_path,
+        episodic_memory=None,
+        working_memory=None,
+        episodic_memory_path=Path("memory.jsonl"),
+    )
+
+    goal_spec = {
+        "goal": "demo",
+        "hypotheses": [{"id": "claim-1"}],
+        "claim_ids": ["claim-1"],
+        "time": "2024-01-02T00:00:00+00:00",
+    }
+
+    asyncio.run(orchestrator.run(goal_spec, {}))
+
+    assert orchestrator.episodic_memory is not None
+    assert orchestrator.working_memory is not None
+
+    memory_file = tmp_path / "memory.jsonl"
+    assert memory_file.exists()
+    contents = memory_file.read_text(encoding="utf-8").strip().splitlines()
+    assert contents, "expected episodic memory file to contain entries"

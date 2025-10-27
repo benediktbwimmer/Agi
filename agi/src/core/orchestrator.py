@@ -21,11 +21,12 @@ class Orchestrator:
     planner: Planner
     critic: Critic
     tools: Mapping[str, Any]
-    episodic_memory: MemoryStore
-    working_memory: WorkingMemory
     world_model: WorldModel
     gatekeeper: Gatekeeper | None = None
     working_dir: Path = Path("artifacts")
+    episodic_memory_path: Path = Path("memory.jsonl")
+    episodic_memory: MemoryStore | None = None
+    working_memory: WorkingMemory | None = None
     enable_memory: bool = True
 
     def __post_init__(self) -> None:
@@ -33,11 +34,26 @@ class Orchestrator:
         if flag is not None:
             self.enable_memory = flag.strip().lower() not in {"0", "false", "no"}
 
+        if self.episodic_memory is None:
+            resolved_path = self.episodic_memory_path
+            if not resolved_path.is_absolute():
+                resolved_path = (self.working_dir / resolved_path).resolve()
+            self.episodic_memory_path = resolved_path
+            self.episodic_memory = MemoryStore(resolved_path)
+
+        if self.working_memory is None:
+            self.working_memory = WorkingMemory()
+
     async def run(self, goal_spec: Dict[str, Any], constraints: Dict[str, Any] | None = None) -> Report:
         constraints = constraints or {}
         run_id = uuid.uuid4().hex
         run_dir = self.working_dir / f"run_{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
+
+        assert self.working_memory is not None
+        assert self.episodic_memory is not None
+        working_memory = self.working_memory
+        episodic_memory = self.episodic_memory
 
         hypotheses = goal_spec.get("hypotheses", [])
         plans = await self.planner.plan_from(hypotheses)
@@ -50,7 +66,7 @@ class Orchestrator:
                 raise RuntimeError(f"Plan {plan.id} rejected: {critique}")
 
         if self.enable_memory:
-            self.working_memory.reset()
+            working_memory.reset()
             self._hydrate_working_memory(goal_spec, plans)
 
         tool_results: List[ToolResult] = []
@@ -69,10 +85,10 @@ class Orchestrator:
                     env_whitelist=list(goal_spec.get("env", [])),
                     network=constraints.get("network", "off"),
                     record_provenance=True,
-                    working_memory=self.working_memory.recall(step.tool)
+                    working_memory=working_memory.recall(step.tool)
                     if self.enable_memory
                     else [],
-                    episodic_memory=self.episodic_memory if self.enable_memory else None,
+                    episodic_memory=episodic_memory if self.enable_memory else None,
                 )
                 result = await tool.run({**step.args, "id": step.id}, ctx)
                 per_plan_results.append(result)
@@ -90,9 +106,9 @@ class Orchestrator:
                         "claim_ids": list(plan.claim_ids),
                         "goal": goal_spec.get("goal"),
                     }
-                    self.working_memory.add_episode(episode)
+                    working_memory.add_episode(episode)
                     if self._is_significant(result):
-                        self.episodic_memory.append(episode)
+                        episodic_memory.append(episode)
 
         update_payloads: List[Dict[str, Any]] = []
         for plan in plans:
@@ -138,6 +154,10 @@ class Orchestrator:
         return report
 
     def _hydrate_working_memory(self, goal_spec: Mapping[str, Any], plans: Iterable[Plan]) -> None:
+        assert self.working_memory is not None
+        assert self.episodic_memory is not None
+        episodic_memory = self.episodic_memory
+
         relevant_tools: Set[str] = set()
         relevant_claims: Set[str] = set(goal_spec.get("claim_ids", []))
         for plan in plans:
@@ -146,19 +166,19 @@ class Orchestrator:
                 relevant_tools.add(step.tool)
 
         if not relevant_claims and not relevant_tools:
-            recent = self.episodic_memory.recent(self.working_memory.capacity_global)
+            recent = episodic_memory.recent(self.working_memory.capacity_global)
             self.working_memory.hydrate(recent)
             return
 
         for claim_id in sorted(relevant_claims):
-            episodes = self.episodic_memory.query_by_claim(claim_id)
+            episodes = episodic_memory.query_by_claim(claim_id)
             if episodes:
                 self.working_memory.hydrate(
                     episodes[-self.working_memory.capacity_per_tool :]
                 )
 
         for tool_name in sorted(relevant_tools):
-            episodes = self.episodic_memory.query_by_tool(tool_name)
+            episodes = episodic_memory.query_by_tool(tool_name)
             if episodes:
                 self.working_memory.hydrate(
                     episodes[-self.working_memory.capacity_per_tool :]

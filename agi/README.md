@@ -104,6 +104,12 @@ records, yielding stateless tool runs. When memory is disabled the orchestrator
 still constructs a valid `RunContext`, but `working_memory` is empty and
 `recall_from_episodic()` becomes a no-op.
 
+When left at the defaults the orchestrator persists episodic history to
+`<working_dir>/memory.jsonl` (with `working_dir` defaulting to `artifacts/`) and
+maintains an in-memory working cache. Supplying custom `MemoryStore` or
+`WorkingMemory` instances allows advanced callers to override these defaults
+while preserving the hydration pipeline above.
+
 ### Validating recall behaviour
 
 Run the focused tests below to exercise the hydration and recall pipeline:
