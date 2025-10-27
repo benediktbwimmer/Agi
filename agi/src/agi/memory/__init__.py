@@ -1,7 +1,7 @@
 """Memory utilities for the AGI package."""
 
-from ...core.memory import MemoryStore
+from agi.src.core.memory import MemoryStore
 
 from .working import MemoryRecord, WorkingMemory
 
-__all__ = ["MemoryStore", "WorkingMemory", "MemoryRecord"]
+__all__ = ("MemoryRecord", "MemoryStore", "WorkingMemory")
