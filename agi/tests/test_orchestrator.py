@@ -320,3 +320,98 @@ def test_orchestrator_replans_with_critic_feedback(tmp_path):
     manifest = json.loads(manifest_path.read_text())
     assert manifest["critiques"][0]["plan_id"] == "plan-risky"
     assert manifest["critiques"][0]["status"] == "REVISION"
+
+
+def test_orchestrator_recovers_from_execution_failure(tmp_path):
+    planner_payloads: list[Dict[str, Any]] = []
+
+    class FallbackPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, payload: Dict[str, Any]) -> str:  # pragma: no cover - exercised indirectly
+            planner_payloads.append(payload)
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    {
+                        "plans": [
+                            {
+                                "id": "plan-glitch",
+                                "claim_ids": ["claim-unstable"],
+                                "steps": [
+                                    {
+                                        "id": "glitch-step",
+                                        "tool": "glitch",  # fails at runtime
+                                        "args": {},
+                                    }
+                                ],
+                                "expected_cost": {},
+                                "risks": [],
+                                "ablations": [],
+                            }
+                        ]
+                    }
+                )
+            return json.dumps(
+                {
+                    "plans": [
+                        {
+                            "id": "plan-stable",
+                            "claim_ids": ["claim-unstable"],
+                            "steps": [
+                                {
+                                    "id": "stable-step",
+                                    "tool": "stable",
+                                    "args": {},
+                                }
+                            ],
+                            "expected_cost": {},
+                            "risks": [],
+                            "ablations": [],
+                        }
+                    ]
+                }
+            )
+
+    planner = Planner(llm=FallbackPlanner())
+    critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    world_model = WorldModel()
+
+    class FailingTool(StubTool):
+        async def run(self, args: Dict[str, Any], ctx: Any):  # pragma: no cover - exercised via orchestrator
+            return await super().run(args, ctx)
+
+    tools = {"glitch": FailingTool(ok=False), "stable": StubTool(ok=True)}
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools=tools,
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+        max_replans=2,
+    )
+
+    report = asyncio.run(orchestrator.run({"goal": "stabilise"}, {}))
+
+    assert report.summary == "Completed run"
+    assert report.belief_deltas and report.belief_deltas[0].credence > 0.5
+    assert world_model.beliefs["claim-unstable"].credence > 0.5
+
+    assert len(planner_payloads) == 2
+    assert planner_payloads[1]["feedback"][0]["status"] == "FAILED_EXECUTION"
+    assert planner_payloads[1]["feedback"][0]["failures"][0]["tool"] == "glitch"
+
+    glitch_records = memory.query_by_tool("glitch")
+    assert glitch_records and glitch_records[-1]["ok"] is False
+
+    stable_records = memory.query_by_tool("stable")
+    assert stable_records and stable_records[-1]["ok"] is True
+
+    manifest_path = next(tmp_path.glob("run_*/manifest.json"))
+    manifest = json.loads(manifest_path.read_text())
+    assert [result["call_id"] for result in manifest["tool_results"]] == [
+        "stable-step"
+    ]
