@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Sequence
 
+from . import ToolCapability, ToolParameter, ToolSpec
 from ..memory import MemoryStore
 from ..types import RunContext, Source, ToolResult
 
@@ -146,4 +147,78 @@ class RetrievalTool:
                     note=provenance_note,
                 )
             ],
+        )
+
+    def describe(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description="Query episodic memory by semantic similarity, claim association, or time range.",
+            safety_tier=self.safety,
+            metadata={"default_limit": self.default_limit, "max_limit": self.max_limit},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Free-form query text for lexical search."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": self.max_limit},
+                    "types": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        ],
+                        "description": "Optional record type filter.",
+                    },
+                    "since": {"type": "string", "format": "date-time"},
+                    "until": {"type": "string", "format": "date-time"},
+                    "claim_id": {"type": "string"},
+                },
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "records": {"type": "array", "items": {"type": "object"}},
+                        },
+                    },
+                    "stdout": {"type": "string"},
+                },
+            },
+            capabilities=(
+                ToolCapability(
+                    name="retrieve_memory",
+                    description="Return recent or relevant episodic memory entries for planner context.",
+                    safety_tier=self.safety,
+                    parameters=(
+                        ToolParameter(
+                            name="query",
+                            description="Text query used for semantic search.",
+                            required=False,
+                            schema={"type": "string"},
+                        ),
+                        ToolParameter(
+                            name="claim_id",
+                            description="Restrict results to a specific claim identifier.",
+                            required=False,
+                            schema={"type": "string"},
+                        ),
+                        ToolParameter(
+                            name="since",
+                            description="ISO timestamp lower bound for record time.",
+                            required=False,
+                            schema={"type": "string", "format": "date-time"},
+                        ),
+                        ToolParameter(
+                            name="until",
+                            description="ISO timestamp upper bound for record time.",
+                            required=False,
+                            schema={"type": "string", "format": "date-time"},
+                        ),
+                    ),
+                    outputs=("data.records",),
+                ),
+            ),
         )
