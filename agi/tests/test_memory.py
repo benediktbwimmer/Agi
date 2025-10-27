@@ -73,3 +73,40 @@ def test_query_by_time_is_sorted(memory_path: Path) -> None:
     )
 
     assert [entry["payload"] for entry in results] == [1, 2, 3]
+
+
+def test_semantic_search_prioritises_recent_relevant_records(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+
+    store.append(
+        {
+            "type": "episode",
+            "tool": "calculator",
+            "time": "2024-01-01T00:00:00+00:00",
+            "stdout": "Computed optimal lunar transfer trajectory",
+        }
+    )
+    store.append(
+        {
+            "type": "reflection",
+            "summary": "Drafted research plan for lunar habitat",
+            "time": "2024-01-01T01:00:00+00:00",
+        }
+    )
+    store.append(
+        {
+            "type": "episode",
+            "tool": "python_runner",
+            "time": "2024-01-01T02:00:00+00:00",
+            "stdout": "Analysed Martian soil sample chemistry",
+        }
+    )
+
+    matches = store.semantic_search("lunar research plan", limit=2)
+    assert len(matches) == 2
+    assert matches[0]["summary"].startswith("Drafted research plan")
+    assert matches[1]["stdout"].startswith("Computed optimal lunar")
+
+    reflections_only = store.semantic_search("research plan", types=["reflection"])
+    assert len(reflections_only) == 1
+    assert reflections_only[0]["type"] == "reflection"
