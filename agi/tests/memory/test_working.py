@@ -62,6 +62,26 @@ def test_context_stack_and_queue_operations():
     assert memory.get("scoped_key") is None
 
 
+def test_delete_without_context_removes_nearest_scope():
+    memory = WorkingMemory(capacity=5)
+
+    memory.set("shared", "root")
+    task = memory.push_context("task")
+    memory.set("shared", "task", context=task.name)
+
+    assert memory.delete("shared") is True
+    # The task-scoped entry is gone but the root value remains accessible.
+    assert memory.get("shared") == "root"
+
+    memory.pop_context()
+
+    # Fall back to root once task context is gone.
+    memory.set("shared", "root")
+    memory.push_context("inner")
+    assert memory.delete("shared") is True
+    assert memory.get("shared") is None
+
+
 def test_serialization_round_trip_preserves_state():
     clock = FakeClock(start=100.0)
 
@@ -82,3 +102,45 @@ def test_serialization_round_trip_preserves_state():
 
     clock.advance(10)
     assert restored.get("episode_key", context="episode") is None
+
+
+def test_equal_priority_prefers_recently_accessed_records():
+    clock = FakeClock()
+    memory = WorkingMemory(capacity=2, time_provider=clock)
+
+    memory.set("a", "A", priority=0.5)
+    clock.advance(1)
+    memory.set("b", "B", priority=0.5)
+
+    # Refresh "a" so that "b" becomes the least recently touched candidate.
+    assert memory.get("a") == "A"
+
+    clock.advance(1)
+    memory.set("c", "C", priority=0.5)
+
+    assert memory.get("a") == "A"
+    assert memory.get("b") is None
+    assert memory.get("c") == "C"
+
+
+def test_updates_refresh_ttl_and_priority():
+    clock = FakeClock()
+    events: list[tuple[str, list[str]]] = []
+
+    def handler(records: list[dict[str, object]], reason: str) -> None:
+        events.append((reason, [record["key"] for record in records]))
+
+    memory = WorkingMemory(capacity=3, default_ttl=5.0, overflow_handler=handler, time_provider=clock)
+
+    memory.set("item", "v1", priority=0.1)
+    clock.advance(1)
+    memory.set("item", "v2", ttl=2.0, priority=0.9)
+
+    assert memory.get("item") == "v2"
+    clock.advance(1.5)
+    assert memory.get("item") == "v2"
+
+    clock.advance(1.0)
+    assert memory.get("item") is None
+    assert events[-1][0] == "expired"
+    assert events[-1][1] == ["item"]

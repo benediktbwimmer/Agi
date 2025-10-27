@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
 
 
 OverflowHandler = Callable[[List[Dict[str, Any]], str], None]
@@ -21,12 +21,14 @@ class MemoryRecord:
     expires_at: Optional[float]
     last_accessed: float
     context_id: int
+    access_counter: int
 
     def is_expired(self, now: float) -> bool:
         return self.expires_at is not None and now >= self.expires_at
 
-    def touch(self, now: float) -> None:
+    def touch(self, now: float, order: int) -> None:
         self.last_accessed = now
+        self.access_counter = order
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -37,6 +39,7 @@ class MemoryRecord:
             "expires_at": self.expires_at,
             "last_accessed": self.last_accessed,
             "context_id": self.context_id,
+            "access_counter": self.access_counter,
         }
 
 
@@ -54,6 +57,9 @@ class Frame:
             "name": self.name,
             "items": [record.to_dict() for record in self.items.values()],
         }
+
+
+ContextSpecifier = Union[int, str, "Frame"]
 
 
 class WorkingMemory:
@@ -76,6 +82,7 @@ class WorkingMemory:
         self._time_provider = time_provider
 
         self._context_counter = 0
+        self._access_counter = 0
         self._frames: List[Frame] = []
         self._queue_boundary = 1
         # Root frame exists by default and cannot be removed.
@@ -108,7 +115,7 @@ class WorkingMemory:
         self._queue_boundary += 1
         return frame
 
-    def dequeue_context(self, name: Optional[str] = None) -> Frame:
+    def dequeue_context(self, name: Optional[ContextSpecifier] = None) -> Frame:
         """Remove the oldest (non-root) context frame."""
 
         if len(self._frames) == 1:
@@ -118,10 +125,15 @@ class WorkingMemory:
             if self._queue_boundary <= 1:
                 raise IndexError("no queued contexts to dequeue")
             idx = 1
+        elif isinstance(name, Frame):
+            idx = self._find_frame_index_by_id(name.id)
+        elif isinstance(name, int):
+            idx = self._find_frame_index_by_id(name)
         else:
             idx = self._find_frame_index(name=name, first=True)
-            if idx == 0:
-                raise ValueError("cannot dequeue the root context")
+
+        if idx == 0:
+            raise ValueError("cannot dequeue the root context")
 
         frame = self._remove_frame(idx, reason="context_removed")
         return frame
@@ -154,7 +166,7 @@ class WorkingMemory:
         key: str,
         value: Any,
         *,
-        context: Optional[str] = None,
+        context: Optional[ContextSpecifier] = None,
         ttl: Optional[float] = None,
         priority: float = 1.0,
     ) -> None:
@@ -165,17 +177,27 @@ class WorkingMemory:
         ttl = self.default_ttl if ttl is None else ttl
         expires_at = None if ttl is None else now + ttl
 
-        record = MemoryRecord(
-            key=key,
-            value=value,
-            priority=priority,
-            created_at=now,
-            expires_at=expires_at,
-            last_accessed=now,
-            context_id=frame.id,
-        )
+        existing = frame.items.get(key)
+        order = self._next_access_order()
+        if existing is not None:
+            existing.value = value
+            existing.priority = priority
+            existing.last_accessed = now
+            existing.expires_at = expires_at
+            existing.access_counter = order
+        else:
+            record = MemoryRecord(
+                key=key,
+                value=value,
+                priority=priority,
+                created_at=now,
+                expires_at=expires_at,
+                last_accessed=now,
+                context_id=frame.id,
+                access_counter=order,
+            )
+            frame.items[key] = record
 
-        frame.items[key] = record
         self._prune_expired(now)
         evicted = self._evict_if_needed()
         if evicted:
@@ -185,7 +207,7 @@ class WorkingMemory:
         self,
         key: str,
         *,
-        context: Optional[str] = None,
+        context: Optional[ContextSpecifier] = None,
         default: Any = None,
     ) -> Any:
         """Retrieve a value from working memory respecting context scoping."""
@@ -202,7 +224,7 @@ class WorkingMemory:
                 del frame.items[key]
                 self._handle_overflow([record], reason="expired")
                 return default
-            record.touch(now)
+            record.touch(now, self._next_access_order())
             return record.value
 
         # Search from top of stack (most specific) to root (least specific).
@@ -213,22 +235,30 @@ class WorkingMemory:
                     del frame.items[key]
                     self._handle_overflow([record], reason="expired")
                     continue
-                record.touch(now)
+                record.touch(now, self._next_access_order())
                 return record.value
 
         return default
 
-    def delete(self, key: str, *, context: Optional[str] = None) -> bool:
+    def delete(self, key: str, *, context: Optional[ContextSpecifier] = None) -> bool:
         """Delete a value from the specified context."""
 
-        frame = self._resolve_frame(context)
-        record = frame.items.pop(key, None)
-        if record is None:
-            return False
-        self._handle_overflow([record], reason="deleted")
-        return True
+        if context is not None:
+            frame = self._resolve_frame(context)
+            record = frame.items.pop(key, None)
+            if record is None:
+                return False
+            self._handle_overflow([record], reason="deleted")
+            return True
 
-    def clear(self, *, context: Optional[str] = None) -> None:
+        for frame in reversed(self._frames):
+            record = frame.items.pop(key, None)
+            if record is not None:
+                self._handle_overflow([record], reason="deleted")
+                return True
+        return False
+
+    def clear(self, *, context: Optional[ContextSpecifier] = None) -> None:
         """Clear either the full working memory or a specific context."""
 
         if context is None:
@@ -280,6 +310,7 @@ class WorkingMemory:
         memory._queue_boundary = payload.get("queue_boundary", 1)
 
         max_id = -1
+        max_access_counter = -1
         for frame_payload in payload.get("contexts", []):
             frame = memory._create_frame(name=frame_payload.get("name"))
             frame.id = frame_payload.get("id", frame.id)
@@ -294,7 +325,9 @@ class WorkingMemory:
                     expires_at=item.get("expires_at"),
                     last_accessed=item.get("last_accessed", item.get("created_at", memory._now())),
                     context_id=frame.id,
+                    access_counter=item.get("access_counter", 0),
                 )
+                max_access_counter = max(max_access_counter, record.access_counter)
                 frame.items[record.key] = record
 
         if not memory._frames:
@@ -302,6 +335,7 @@ class WorkingMemory:
 
         memory._queue_boundary = min(max(len(memory._frames), 1), max(memory._queue_boundary, 1))
         memory._context_counter = max(memory._context_counter, max_id + 1)
+        memory._access_counter = max(memory._access_counter, max_access_counter + 1, 0)
 
         return memory
 
@@ -311,21 +345,39 @@ class WorkingMemory:
     def _now(self) -> float:
         return float(self._time_provider())
 
-    def _resolve_frame(self, context: Optional[str]) -> Frame:
+    def _resolve_frame(self, context: Optional[ContextSpecifier]) -> Frame:
         if context is None:
             return self._frames[-1]
+
+        if isinstance(context, Frame):
+            frame = self._frame_by_id(context.id)
+            if frame is None:
+                raise KeyError(f"context with id {context.id} not found")
+            return frame
+
+        if isinstance(context, int):
+            frame = self._frame_by_id(context)
+            if frame is None:
+                raise KeyError(f"context with id {context} not found")
+            return frame
 
         if isinstance(context, str):
             idx = self._find_frame_index(name=context, first=False)
             return self._frames[idx]
 
-        raise TypeError("context must be a frame name or None")
+        raise TypeError("context must be a frame name, id, Frame, or None")
 
     def _find_frame_index(self, name: str, *, first: bool) -> int:
         matches = [idx for idx, frame in enumerate(self._frames) if frame.name == name]
         if not matches:
             raise KeyError(f"context '{name}' not found")
         return matches[0] if first else matches[-1]
+
+    def _find_frame_index_by_id(self, frame_id: int) -> int:
+        for idx, frame in enumerate(self._frames):
+            if frame.id == frame_id:
+                return idx
+        raise KeyError(f"context with id {frame_id} not found")
 
     def _create_frame(self, name: Optional[str]) -> Frame:
         frame_id = self._context_counter
@@ -381,7 +433,14 @@ class WorkingMemory:
             candidates.extend(frame.items.values())
         if not candidates:
             return None
-        candidates.sort(key=lambda record: (record.priority, record.created_at))
+        candidates.sort(
+            key=lambda record: (
+                record.priority,
+                record.last_accessed,
+                record.access_counter,
+                record.created_at,
+            )
+        )
         return candidates[0]
 
     def _frame_by_id(self, frame_id: int) -> Optional[Frame]:
@@ -392,6 +451,11 @@ class WorkingMemory:
 
     def _total_items(self) -> int:
         return sum(len(frame.items) for frame in self._frames)
+
+    def _next_access_order(self) -> int:
+        order = self._access_counter
+        self._access_counter += 1
+        return order
 
     def _handle_overflow(self, records: List[MemoryRecord], *, reason: str) -> None:
         if not records:
