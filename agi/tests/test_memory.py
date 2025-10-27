@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from agi.src.core.memory import MemoryStore, _hash_source
+from agi.src.core.types import RunContext
 
 
 @pytest.fixture
@@ -73,3 +74,40 @@ def test_query_by_time_is_sorted(memory_path: Path) -> None:
     )
 
     assert [entry["payload"] for entry in results] == [1, 2, 3]
+
+
+def test_run_context_recall_filters_by_query(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+    store.append(
+        {
+            "type": "episode",
+            "tool": "python_runner",
+            "call_id": "call-1",
+            "stdout": "alpha result",
+            "time": "2024-01-01T00:00:00+00:00",
+            "claim_ids": ["claim-alpha"],
+        }
+    )
+    store.append(
+        {
+            "type": "episode",
+            "tool": "python_runner",
+            "call_id": "call-2",
+            "stdout": "beta result",
+            "time": "2024-01-01T00:01:00+00:00",
+            "claim_ids": ["claim-beta"],
+        }
+    )
+
+    ctx = RunContext(
+        working_dir="/tmp",
+        timeout_s=5,
+        env_whitelist=[],
+        network="off",
+        record_provenance=True,
+        episodic_memory=store,
+    )
+
+    filtered = ctx.recall_from_episodic(tool="python_runner", text_query="alpha")
+    assert len(filtered) == 1
+    assert filtered[0]["call_id"] == "call-1"

@@ -80,6 +80,9 @@ class MemoryStore:
             for record in self._time_records[-limit:]
         ]
 
+    def all(self) -> List[Dict[str, Any]]:
+        return [json.loads(json.dumps(record)) for record in self._time_records]
+
     def _index_record(self, record: Dict[str, Any]) -> None:
         if "time" in record:
             try:
