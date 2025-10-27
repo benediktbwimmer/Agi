@@ -70,6 +70,7 @@ class MemoryStore:
     _tool_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
     _source_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
     _token_index: Dict[str, List[int]] = field(default_factory=dict, init=False)
+    _plan_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +119,24 @@ class MemoryStore:
 
     def query_by_source_hash(self, digest: str) -> List[Dict[str, Any]]:
         return [json.loads(json.dumps(r)) for r in self._source_index.get(digest, [])]
+
+    def query_by_plan(self, plan_id: str) -> List[Dict[str, Any]]:
+        return [json.loads(json.dumps(r)) for r in self._plan_index.get(plan_id, [])]
+
+    def recent(
+        self, *, limit: int = 20, types: Iterable[str] | None = None
+    ) -> List[Dict[str, Any]]:
+        if limit <= 0:
+            return []
+        type_filter = {t for t in types} if types is not None else None
+        results: List[Dict[str, Any]] = []
+        for record in reversed(self._time_records):
+            if type_filter is not None and record.get("type") not in type_filter:
+                continue
+            results.append(json.loads(json.dumps(record)))
+            if len(results) >= limit:
+                break
+        return list(reversed(results))
 
     def semantic_search(
         self,
@@ -192,6 +211,11 @@ class MemoryStore:
         tool_name = stored_record.get("tool")
         if tool_name:
             bucket = self._tool_index.setdefault(tool_name, [])
+            if stored_record not in bucket:
+                bucket.append(stored_record)
+        plan_id = stored_record.get("plan_id")
+        if isinstance(plan_id, str) and plan_id:
+            bucket = self._plan_index.setdefault(plan_id, [])
             if stored_record not in bucket:
                 bucket.append(stored_record)
         sources = stored_record.get("sources") or stored_record.get("provenance")

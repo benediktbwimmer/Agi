@@ -20,7 +20,7 @@ class StaticPlanner(Planner):
         super().__init__(llm=lambda payload: json.dumps({}))
         self._plans = plans
 
-    async def plan_from(self, hypotheses, *, feedback=None):  # type: ignore[override]
+    async def plan_from(self, hypotheses, *, feedback=None, memory_context=None):  # type: ignore[override]
         return list(self._plans)
 
 

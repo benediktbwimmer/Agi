@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Set
 from .critic import Critic
 from .manifest import RunManifest
 from .memory import MemoryStore
+from .memory_retrieval import MemoryRetriever
 from .planner import Planner
 from .safety import SafetyDecision, enforce_plan_safety
 from .tools import describe_tool
@@ -29,6 +30,11 @@ class Orchestrator:
     working_dir: Path = Path("artifacts")
     telemetry: Telemetry | None = None
     max_replans: int = 2
+    memory_retriever: MemoryRetriever | None = None
+
+    def __post_init__(self) -> None:
+        if self.memory_retriever is None:
+            self.memory_retriever = MemoryRetriever(self.memory)
 
     def _emit(self, event: str, **payload: Any) -> None:
         if self.telemetry is not None:
@@ -55,8 +61,34 @@ class Orchestrator:
         plan_results: Dict[str, List[ToolResult]] = {}
         safety_audit: List[SafetyDecision] = []
 
+        memory_context_payload: Dict[str, Any] | None = None
+        if self.memory_retriever is not None:
+            goal_text = goal_spec.get("goal")
+            if isinstance(goal_text, str):
+                context_limit = int(goal_spec.get("memory_context_limit", 0)) or None
+                recent_limit = int(goal_spec.get("memory_recent_limit", 0)) or None
+                context = self.memory_retriever.context_for_goal(
+                    goal_text,
+                    limit=context_limit,
+                    recent=recent_limit,
+                )
+                semantic_matches = context.get("semantic", {}).get("matches", []) if context.get("semantic") else []
+                recent_records = context.get("recent", {}).get("records", []) if context.get("recent") else []
+                if semantic_matches or recent_records:
+                    memory_context_payload = context
+                    self._emit(
+                        "orchestrator.memory_context_ready",
+                        run_id=run_id,
+                        semantic_matches=len(semantic_matches),
+                        recent_records=len(recent_records),
+                    )
+
         for attempt in range(self.max_replans + 1):
-            plans = await self.planner.plan_from(hypotheses, feedback=feedback)
+            plans = await self.planner.plan_from(
+                hypotheses,
+                feedback=feedback,
+                memory_context=memory_context_payload,
+            )
             plan_critiques: List[Dict[str, Any]] = []
             replan_required = False
             for plan in plans:

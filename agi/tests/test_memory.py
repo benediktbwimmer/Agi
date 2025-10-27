@@ -58,6 +58,20 @@ def test_tool_index(memory_path: Path) -> None:
     assert len(results) == 1
 
 
+def test_plan_index(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+    record = {
+        "type": "episode",
+        "tool": "python_runner",
+        "time": "2024-01-01T00:00:00+00:00",
+        "plan_id": "plan-42",
+    }
+    store.append(record)
+    matches = store.query_by_plan("plan-42")
+    assert len(matches) == 1
+    assert matches[0]["plan_id"] == "plan-42"
+
+
 def test_query_by_time_is_sorted(memory_path: Path) -> None:
     store = MemoryStore(memory_path)
     records = [
@@ -73,6 +87,23 @@ def test_query_by_time_is_sorted(memory_path: Path) -> None:
     )
 
     assert [entry["payload"] for entry in results] == [1, 2, 3]
+
+
+def test_recent_returns_most_recent_records(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+    records = [
+        {"type": "event", "time": "2024-01-01T00:00:00+00:00", "payload": 1},
+        {"type": "event", "time": "2024-01-01T00:01:00+00:00", "payload": 2},
+        {"type": "event", "time": "2024-01-01T00:02:00+00:00", "payload": 3},
+    ]
+    for record in records:
+        store.append(record)
+
+    recent = store.recent(limit=2)
+    assert [entry["payload"] for entry in recent] == [2, 3]
+
+    recent_filtered = store.recent(limit=5, types=["event"])
+    assert len(recent_filtered) == 3
 
 
 def test_semantic_search_prioritises_recent_relevant_records(memory_path: Path) -> None:

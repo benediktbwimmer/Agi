@@ -415,3 +415,76 @@ def test_orchestrator_recovers_from_execution_failure(tmp_path):
     assert [result["call_id"] for result in manifest["tool_results"]] == [
         "stable-step"
     ]
+
+
+def test_orchestrator_builds_memory_context_for_planner(tmp_path):
+    captured: Dict[str, Any] = {}
+
+    def llm(payload: Dict[str, Any]) -> str:
+        captured["payload"] = payload
+        return json.dumps(
+            {
+                "plans": [
+                    {
+                        "id": "plan-ctx",
+                        "claim_ids": ["ctx-1"],
+                        "steps": [
+                            {
+                                "id": "ctx-step",
+                                "tool": "context_tool",
+                                "args": {},
+                                "safety_level": "T0",
+                            }
+                        ],
+                        "expected_cost": {},
+                        "risks": [],
+                        "ablations": [],
+                    }
+                ]
+            }
+        )
+
+    planner = Planner(llm=llm)
+    critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    world_model = WorldModel()
+    tool = StubTool(ok=True)
+
+    memory.append(
+        {
+            "type": "reflection",
+            "summary": "Analysed prior lunar habitat study",
+            "time": "2024-01-01T00:00:00+00:00",
+        }
+    )
+    memory.append(
+        {
+            "type": "episode",
+            "tool": "context_tool",
+            "time": "2024-01-01T01:00:00+00:00",
+            "stdout": "Evaluated habitat life support",
+        }
+    )
+
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools={"context_tool": tool},
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+    )
+
+    asyncio.run(orchestrator.run({"goal": "Design lunar habitat"}, {}))
+
+    assert "payload" in captured
+    memory_context = captured["payload"].get("memory_context")
+    assert memory_context is not None
+    assert memory_context.get("goal") == "Design lunar habitat"
+    semantic = memory_context.get("semantic")
+    recent = memory_context.get("recent")
+    assert semantic or recent
+    if semantic:
+        assert semantic["coverage"]["reflection"] >= 1
+    if recent:
+        assert any(record.get("tool") == "context_tool" for record in recent["records"])
