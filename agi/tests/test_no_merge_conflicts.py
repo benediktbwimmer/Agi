@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 def _git_dir() -> Path:
     result = subprocess.run(
@@ -70,3 +72,54 @@ def test_repository_not_in_merge_flow() -> None:
     ]
     offenders = [name for name in sentinels if (git_dir / name).exists()]
     assert not offenders, f"merge/rebase in-progress detected via {offenders}"
+
+
+def _resolve_git_ref(name: str) -> str | None:
+    """Return the full SHA for ``name`` if it exists, otherwise ``None``."""
+
+    result = subprocess.run(
+        ["git", "rev-parse", name], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _merge_tree_has_conflicts(base: str, ours: str, theirs: str) -> bool:
+    """Check ``git merge-tree`` output for conflict markers."""
+
+    result = subprocess.run(
+        ["git", "merge-tree", base, ours, theirs],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    markers = {"<" * 7, "=" * 7, ">" * 7, "|" * 7}
+    return any(marker in result.stdout for marker in markers)
+
+
+@pytest.mark.parametrize("candidate", ("main", "origin/main"))
+def test_head_merges_cleanly_with_main(candidate: str) -> None:
+    """If a ``main`` ref is present, ensure ``HEAD`` merges without conflicts."""
+
+    target = _resolve_git_ref(candidate)
+    if target is None:
+        pytest.skip(f"{candidate} ref not available; skipping merge simulation")
+
+    ours = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    merge_base = subprocess.run(
+        ["git", "merge-base", ours, target],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    has_conflicts = _merge_tree_has_conflicts(merge_base, ours, target)
+    assert not has_conflicts, (
+        "simulated merge with main produced conflict markers; resolve conflicts"
+    )
