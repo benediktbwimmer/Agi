@@ -57,6 +57,15 @@ def test_timeline_respects_limits(memory_store: MemoryStore) -> None:
     window = retriever.timeline(limit=2)
     assert len(window.records) == 2
     assert window.records[0]["stdout"] == "result-1"
+    assert window.filters is None
+
+
+def test_timeline_applies_tool_filters(memory_store: MemoryStore) -> None:
+    retriever = MemoryRetriever(memory_store)
+    window = retriever.timeline(limit=5, tools=["python_runner"])
+    assert len(window.records) == 1
+    assert window.records[0]["tool"] == "python_runner"
+    assert window.filters == {"tools": ["python_runner"]}
 
 
 def test_plan_context_groups_records(memory_store: MemoryStore) -> None:

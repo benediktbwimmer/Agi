@@ -89,14 +89,18 @@ class TemporalWindow:
     end: Optional[str]
     records: List[Dict[str, Any]]
     coverage: Dict[str, int] = field(default_factory=dict)
+    filters: Dict[str, Any] | None = None
 
     def to_payload(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "start": self.start,
             "end": self.end,
             "records": self.records,
             "coverage": dict(self.coverage),
         }
+        if self.filters:
+            payload["filters"] = dict(self.filters)
+        return payload
 
 
 @dataclass
@@ -174,27 +178,46 @@ class MemoryRetriever:
         end: Optional[str] = None,
         limit: Optional[int] = None,
         types: Sequence[str] | None = None,
+        tools: Sequence[str] | None = None,
     ) -> TemporalWindow:
         limit_value = _normalise_limit(limit, self.default_limit)
+        if limit_value == 0:
+            return TemporalWindow(start=start, end=end, records=[], coverage={})
+
+        tool_filter = {t for t in tools} if tools is not None else None
+        requested_types = list(types) if types is not None else None
+
         if start or end:
             start_bound = start or "1970-01-01T00:00:00+00:00"
             end_bound = end or "9999-12-31T23:59:59+00:00"
             records = self.memory.query_by_time(start_bound, end_bound)
         else:
-            records = self.memory.recent(limit=max(limit_value * 3, limit_value), types=types)
+            fetch_limit = max(limit_value * 3, limit_value)
+            records = self.memory.recent(limit=fetch_limit, types=types)
 
-        if types is not None and (start or end):
-            type_set = {t for t in types}
+        if requested_types is not None and (start or end):
+            type_set = set(requested_types)
             records = [r for r in records if r.get("type") in type_set]
 
-        if not start and not end:
-            # ``recent`` already returns chronologically ordered records.
-            sliced = records[-limit_value:] if limit_value else []
-        else:
-            sliced = records[-limit_value:] if limit_value else []
+        if tool_filter is not None:
+            filtered_by_tool: List[Dict[str, Any]] = []
+            for record in records:
+                if _record_tools(record).intersection(tool_filter):
+                    filtered_by_tool.append(record)
+            records = filtered_by_tool
+
+        sliced = records[-limit_value:]
 
         coverage = _compute_coverage(sliced)
-        return TemporalWindow(start=start, end=end, records=sliced, coverage=coverage)
+        filter_meta: Dict[str, Any] | None = None
+        if requested_types or tools:
+            filter_meta = {}
+            if requested_types:
+                filter_meta["types"] = list(requested_types)
+            if tools:
+                filter_meta["tools"] = list(tools)
+
+        return TemporalWindow(start=start, end=end, records=sliced, coverage=coverage, filters=filter_meta)
 
     def context_for_goal(
         self,
