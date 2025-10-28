@@ -6,7 +6,7 @@ import re
 from bisect import bisect_left, bisect_right
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
@@ -21,6 +21,26 @@ _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+")
 def _normalise_time(ts: str) -> datetime:
     ts = ts.replace("Z", "+00:00")
     return datetime.fromisoformat(ts)
+
+
+def _coerce_datetime(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    if isinstance(value, str):
+        return _normalise_time(value)
+    raise TypeError(f"Unsupported datetime value: {value!r}")
+
+
+def _coerce_timedelta(value: timedelta | int | float | None) -> timedelta | None:
+    if value is None:
+        return None
+    if isinstance(value, timedelta):
+        return value
+    if isinstance(value, (int, float)):
+        return timedelta(seconds=float(value))
+    raise TypeError(f"Unsupported timedelta value: {value!r}")
 
 
 def _hash_source(source: Dict[str, Any]) -> str:
@@ -122,6 +142,57 @@ class MemoryStore:
 
     def query_by_plan(self, plan_id: str) -> List[Dict[str, Any]]:
         return [json.loads(json.dumps(r)) for r in self._plan_index.get(plan_id, [])]
+
+    def temporal_window(
+        self,
+        *,
+        anchor: datetime | str | None = None,
+        before: timedelta | int | float | None = None,
+        after: timedelta | int | float | None = None,
+        limit: int | None = 50,
+        types: Iterable[str] | None = None,
+    ) -> List[Dict[str, Any]]:
+        """Return records around ``anchor`` constrained by ``before``/``after`` windows.
+
+        ``before`` and ``after`` accept :class:`datetime.timedelta` instances or seconds.
+        When ``anchor`` is omitted the most recent timestamp is used as the reference
+        point.  Results are returned in chronological order and can be filtered by
+        ``types``.
+        """
+
+        if before is None and after is None:
+            raise ValueError("temporal_window requires at least one of 'before' or 'after'")
+        if not self._time_records:
+            return []
+
+        before_delta = _coerce_timedelta(before)
+        after_delta = _coerce_timedelta(after)
+
+        if anchor is None:
+            anchor_dt = self._time_keys[-1]
+        else:
+            anchor_dt = _coerce_datetime(anchor)
+
+        start_dt = anchor_dt - before_delta if before_delta is not None else anchor_dt
+        end_dt = anchor_dt + after_delta if after_delta is not None else anchor_dt
+
+        if start_dt > end_dt:
+            start_dt, end_dt = end_dt, start_dt
+
+        start_idx = bisect_left(self._time_keys, start_dt)
+        end_idx = bisect_right(self._time_keys, end_dt)
+
+        type_filter = {t for t in types} if types is not None else None
+        results: List[Dict[str, Any]] = []
+
+        for record in self._time_records[start_idx:end_idx]:
+            if type_filter is not None and record.get("type") not in type_filter:
+                continue
+            results.append(json.loads(json.dumps(record)))
+            if limit is not None and limit > 0 and len(results) >= limit:
+                break
+
+        return results
 
     def recent(
         self, *, limit: int = 20, types: Iterable[str] | None = None
