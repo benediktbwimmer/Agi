@@ -10,7 +10,7 @@ from threading import RLock
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 import uuid
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 StateSerializer = Callable[[Any], str]
@@ -38,9 +38,14 @@ class Episode(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     state_snapshot: Optional[Any] = None
 
-    @validator("events", pre=True, each_item=False)
-    def _ensure_events(cls, value: Iterable[EpisodeEvent]) -> List[EpisodeEvent]:
-        return list(value or [])
+    @field_validator("events", mode="before")
+    @classmethod
+    def _ensure_events(cls, value: Optional[Iterable[EpisodeEvent]]) -> List[EpisodeEvent]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return list(value)
 
 
 @dataclass
