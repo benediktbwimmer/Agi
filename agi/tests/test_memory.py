@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -141,3 +141,38 @@ def test_semantic_search_prioritises_recent_relevant_records(memory_path: Path) 
     reflections_only = store.semantic_search("research plan", types=["reflection"])
     assert len(reflections_only) == 1
     assert reflections_only[0]["type"] == "reflection"
+
+
+def test_temporal_window_respects_anchor_and_filters(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    for idx in range(5):
+        store.append(
+            {
+                "type": "reflection" if idx % 2 else "episode",
+                "time": (base + timedelta(minutes=idx)).isoformat(),
+                "payload": idx,
+            }
+        )
+
+    window = store.temporal_window(
+        anchor=base + timedelta(minutes=2),
+        before=timedelta(minutes=1),
+        after=timedelta(minutes=1),
+    )
+
+    assert [entry["payload"] for entry in window] == [1, 2, 3]
+
+    reflections_only = store.temporal_window(
+        anchor=base + timedelta(minutes=2),
+        before=120,
+        after=120,
+        types=["reflection"],
+    )
+    assert [entry["payload"] for entry in reflections_only] == [1, 3]
+
+    limited = store.temporal_window(before=180, after=0, limit=1)
+    assert len(limited) == 1
+
+    with pytest.raises(ValueError):
+        store.temporal_window()
