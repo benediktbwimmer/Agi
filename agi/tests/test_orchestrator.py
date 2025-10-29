@@ -486,6 +486,8 @@ def test_orchestrator_populates_working_memory(tmp_path):
     assert working.goal == "Assess options"
     assert len(working.hypotheses) == 1
     assert len(working.attempts) == 2
+    assert working.input_provenance is not None
+    assert working.input_provenance.get("goal") == "Assess options"
 
     first_attempt, second_attempt = working.attempts
     assert first_attempt.status == "needs_replan"
@@ -504,6 +506,7 @@ def test_orchestrator_populates_working_memory(tmp_path):
     snapshot = working.to_dict()
     assert snapshot["goal"] == "Assess options"
     assert snapshot["attempts"][0]["plans"][0]["rationale_tags"]
+    assert snapshot.get("input_provenance", {}).get("goal") == "Assess options"
 
 
 def test_orchestrator_builds_memory_context_for_planner(tmp_path):

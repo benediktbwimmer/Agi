@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
-from . import ToolCapability, ToolParameter, ToolSpec
+from . import SensorProfile, ToolCapability, ToolParameter, ToolSpec
 from ..types import RunContext, Source, ToolResult
 
 
@@ -110,6 +110,12 @@ class PythonRunner:
             description="Execute sandboxed Python code with filesystem isolation and no network access.",
             safety_tier=self.safety,
             metadata={"artifacts_root": str(self._artifacts_root)},
+            sensor_profile=SensorProfile(
+                modality="code_execution",
+                latency_ms=250,
+                trust="medium",
+                description="Runs Python snippets inside a hermetic sandbox",
+            ),
             input_schema={
                 "type": "object",
                 "properties": {

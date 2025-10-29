@@ -106,6 +106,7 @@ class ManifestToolSpec(BaseModel):
     output_schema: dict[str, Any] = Field(default_factory=dict)
     capabilities: Sequence[ManifestToolCapability] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    sensor_profile: dict[str, Any] | None = None
 
 
 class RunManifest(BaseModel):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from . import ToolCapability, ToolParameter, ToolSpec
+from . import SensorProfile, ToolCapability, ToolParameter, ToolSpec
 from ..types import RunContext, ToolResult
 
 
@@ -49,6 +49,12 @@ class PhysicsSimulator:
             name=self.name,
             description="Simulate projectile motion in a simple physics model.",
             safety_tier=self.safety,
+            sensor_profile=SensorProfile(
+                modality="simulation",
+                latency_ms=80,
+                trust="medium",
+                description="Numerical physics integrator for simple projectile motion",
+            ),
             input_schema={
                 "type": "object",
                 "properties": {

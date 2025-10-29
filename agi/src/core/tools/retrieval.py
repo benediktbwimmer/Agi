@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set
 
-from . import ToolCapability, ToolParameter, ToolSpec
+from . import SensorProfile, ToolCapability, ToolParameter, ToolSpec
 from ..memory import MemoryStore
 from ..types import RunContext, Source, ToolResult
 
@@ -174,6 +174,12 @@ class RetrievalTool:
             description="Query episodic memory by semantic similarity, claim association, or time range.",
             safety_tier=self.safety,
             metadata={"default_limit": self.default_limit, "max_limit": self.max_limit},
+            sensor_profile=SensorProfile(
+                modality="memory",
+                latency_ms=120,
+                trust="medium",
+                description="Retrieves contextual memory slices for planning",
+            ),
             input_schema={
                 "type": "object",
                 "properties": {

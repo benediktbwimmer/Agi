@@ -72,8 +72,13 @@ def test_orchestrator_emits_structured_events(tmp_path: Path) -> None:
     assert "orchestrator.run_started" in event_types
     assert "orchestrator.tool_started" in event_types
     assert "orchestrator.tool_completed" in event_types
+    assert "orchestrator.input_provenance_ready" in event_types
     assert "memory.append" in event_types
     assert events[-1]["event"] == "orchestrator.run_completed"
+
+    tool_started = next(event for event in events if event["event"] == "orchestrator.tool_started")
+    assert "provenance" in tool_started
+    assert tool_started["provenance"]["plan"]["id"]
 
 
 def test_json_lines_sink_writes_file(tmp_path: Path) -> None:
