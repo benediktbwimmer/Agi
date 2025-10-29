@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Protocol, TypedDict
 
@@ -387,6 +388,29 @@ class Belief:
     credence: float
     evidence: List[Source]
     last_updated: str
+    support: float = 0.0
+    conflict: float = 0.0
+
+    @property
+    def evidence_strength(self) -> float:
+        """Total weight of supporting and conflicting evidence."""
+
+        return self.support + self.conflict
+
+    @property
+    def uncertainty(self) -> float:
+        """Simple exponentially decaying uncertainty metric.
+
+        The metric approaches ``1.0`` when no evidence has been observed and
+        decreases towards ``0.0`` as the cumulative evidence weight increases.
+        This keeps callers agnostic of how the world model combines evidence
+        while still allowing them to gauge how decisive the belief is.
+        """
+
+        total = self.evidence_strength
+        if total <= 0:
+            return 1.0
+        return math.exp(-total)
 
 
 @dataclass

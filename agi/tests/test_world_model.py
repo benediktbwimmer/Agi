@@ -21,6 +21,9 @@ def test_world_model_updates_and_checks_units():
         ]
     )
     assert updates[0].credence > 0.5
+    assert math.isclose(updates[0].support, 1.5)
+    assert math.isclose(updates[0].conflict, 0.0)
+    assert 0.0 < updates[0].uncertainty < 1.0
 
     try:
         wm.update(
@@ -72,3 +75,20 @@ def test_world_model_accepts_external_timestamp():
         {"claim_id": "time", "passed": True, "timestamp": ts}
     ])[0]
     assert result.last_updated == "2024-01-02T03:04:05+00:00"
+
+
+def test_world_model_tracks_evidence_strength():
+    wm = WorldModel()
+    first = wm.update([
+        {"claim_id": "strength", "passed": True, "weight": 1.0}
+    ])[0]
+    assert math.isclose(first.support, 1.0)
+    assert math.isclose(first.conflict, 0.0)
+    assert first.uncertainty < 1.0
+
+    second = wm.update([
+        {"claim_id": "strength", "passed": False, "weight": 0.5}
+    ])[0]
+    assert math.isclose(second.support, 1.0)
+    assert math.isclose(second.conflict, 0.5)
+    assert second.uncertainty < first.uncertainty
