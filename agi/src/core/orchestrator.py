@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Set
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
 
 from .critic import Critic
 from .manifest import RunManifest
@@ -20,6 +20,115 @@ from ..governance.gatekeeper import Gatekeeper
 
 
 @dataclass
+class PlanTrace:
+    """Snapshot of deliberation information for a single plan."""
+
+    plan_id: str
+    claim_ids: List[str]
+    step_count: int
+    approved: Optional[bool] = None
+    execution_succeeded: Optional[bool] = None
+    rationale_tags: Set[str] = field(default_factory=set)
+
+    def mark_approved(self) -> None:
+        self.approved = True
+
+    def mark_rejected(self) -> None:
+        self.approved = False
+
+    def mark_execution(self, succeeded: bool) -> None:
+        self.execution_succeeded = succeeded
+
+    def add_rationale_tags(self, tags: Iterable[str]) -> None:
+        for tag in tags:
+            if tag:
+                self.rationale_tags.add(str(tag))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "claim_ids": list(self.claim_ids),
+            "step_count": self.step_count,
+            "approved": self.approved,
+            "execution_succeeded": self.execution_succeeded,
+            "rationale_tags": sorted(self.rationale_tags),
+        }
+
+
+@dataclass
+class DeliberationAttempt:
+    """Tracks a single orchestration attempt across planning and execution."""
+
+    index: int
+    status: str = "planning"
+    plans: List[PlanTrace] = field(default_factory=list)
+    critiques: List[Dict[str, Any]] = field(default_factory=list)
+    execution_feedback: List[Dict[str, Any]] = field(default_factory=list)
+    _plan_index: Dict[str, PlanTrace] = field(default_factory=dict, init=False, repr=False)
+
+    def register_plan(self, plan: Plan) -> PlanTrace:
+        trace = PlanTrace(
+            plan_id=plan.id,
+            claim_ids=list(plan.claim_ids),
+            step_count=len(plan.steps),
+        )
+        self.plans.append(trace)
+        self._plan_index[plan.id] = trace
+        return trace
+
+    def record_critique(self, plan_id: str, critique: Dict[str, Any]) -> None:
+        self.critiques.append(dict(critique))
+        plan = self._plan_index.get(plan_id)
+        if plan is not None:
+            plan.mark_rejected()
+            plan.add_rationale_tags(critique.get("rationale_tags", []))
+
+    def record_execution_feedback(self, feedback: Iterable[Dict[str, Any]]) -> None:
+        self.execution_feedback = [dict(item) for item in feedback]
+
+    def mark_status(self, status: str) -> None:
+        self.status = status
+
+    def update_execution_results(self, result_map: Mapping[str, bool]) -> None:
+        for plan_id, succeeded in result_map.items():
+            plan = self._plan_index.get(plan_id)
+            if plan is not None:
+                plan.mark_execution(succeeded)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "index": self.index,
+            "status": self.status,
+            "plans": [plan.to_dict() for plan in self.plans],
+            "critiques": [dict(item) for item in self.critiques],
+            "execution_feedback": [dict(item) for item in self.execution_feedback],
+        }
+
+
+@dataclass
+class WorkingMemory:
+    """Lightweight working memory capturing deliberation history."""
+
+    run_id: str
+    goal: Optional[str]
+    hypotheses: List[Any]
+    attempts: List[DeliberationAttempt] = field(default_factory=list)
+
+    def start_attempt(self, index: int) -> DeliberationAttempt:
+        attempt = DeliberationAttempt(index=index)
+        self.attempts.append(attempt)
+        return attempt
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "goal": self.goal,
+            "hypotheses": json.loads(json.dumps(self.hypotheses)),
+            "attempts": [attempt.to_dict() for attempt in self.attempts],
+        }
+
+
+@dataclass
 class Orchestrator:
     planner: Planner
     critic: Critic
@@ -32,6 +141,8 @@ class Orchestrator:
     max_replans: int = 2
     memory_retriever: MemoryRetriever | None = None
 
+    _working_memory: WorkingMemory | None = field(init=False, default=None, repr=False)
+
     def __post_init__(self) -> None:
         if self.memory_retriever is None:
             self.memory_retriever = MemoryRetriever(self.memory)
@@ -39,6 +150,12 @@ class Orchestrator:
     def _emit(self, event: str, **payload: Any) -> None:
         if self.telemetry is not None:
             self.telemetry.emit(event, **payload)
+
+    @property
+    def working_memory(self) -> WorkingMemory | None:
+        """Return the latest working memory snapshot."""
+
+        return self._working_memory
 
     async def run(self, goal_spec: Dict[str, Any], constraints: Dict[str, Any] | None = None) -> Report:
         constraints = constraints or {}
@@ -60,6 +177,12 @@ class Orchestrator:
         tool_results: List[ToolResult] = []
         plan_results: Dict[str, List[ToolResult]] = {}
         safety_audit: List[SafetyDecision] = []
+
+        self._working_memory = WorkingMemory(
+            run_id=run_id,
+            goal=str(goal_spec.get("goal")) if goal_spec.get("goal") is not None else None,
+            hypotheses=json.loads(json.dumps(hypotheses)),
+        )
 
         memory_context_payload: Dict[str, Any] | None = None
         if self.memory_retriever is not None:
@@ -84,6 +207,7 @@ class Orchestrator:
                     )
 
         for attempt in range(self.max_replans + 1):
+            working_attempt = self._working_memory.start_attempt(attempt)
             plans = await self.planner.plan_from(
                 hypotheses,
                 feedback=feedback,
@@ -92,6 +216,7 @@ class Orchestrator:
             plan_critiques: List[Dict[str, Any]] = []
             replan_required = False
             for plan in plans:
+                plan_trace = working_attempt.register_plan(plan)
                 self._emit(
                     "orchestrator.plan_ready",
                     run_id=run_id,
@@ -101,9 +226,11 @@ class Orchestrator:
                 critique = await self.critic.check(_plan_to_dict(plan))
                 status = str(critique.get("status", "FAIL")).upper()
                 if status == "PASS":
+                    plan_trace.mark_approved()
                     continue
                 critique_record = _normalise_critique(plan.id, critique)
                 critiques.append(critique_record)
+                working_attempt.record_critique(plan.id, critique_record)
                 memory_entries.append(
                     _critique_memory_record(
                         critique_record,
@@ -120,6 +247,7 @@ class Orchestrator:
                 plan_critiques.append(critique_record)
                 replan_required = True
             if replan_required:
+                working_attempt.mark_status("needs_replan")
                 feedback.extend(
                     json.loads(json.dumps(record)) for record in plan_critiques
                 )
@@ -132,6 +260,8 @@ class Orchestrator:
             attempt_plan_results: Dict[str, List[ToolResult]] = {}
             attempt_result_indices: Dict[str, Dict[str, ToolResult]] = {}
             attempt_memory_entries: List[Dict[str, Any]] = []
+
+            working_attempt.mark_status("executing")
 
             for plan in plans:
                 per_plan_results: List[ToolResult] = []
@@ -171,11 +301,17 @@ class Orchestrator:
                         plan_id=item["plan_id"],
                         failure_count=len(item.get("failures", [])),
                     )
+                working_attempt.record_execution_feedback(execution_feedback)
+                working_attempt.mark_status("retry")
                 feedback.extend(json.loads(json.dumps(item)) for item in execution_feedback)
                 continue
 
             tool_results = attempt_tool_results
             plan_results = attempt_plan_results
+            working_attempt.update_execution_results(
+                {plan.id: not plan_failure_map.get(plan.id, False) for plan in plans}
+            )
+            working_attempt.mark_status("complete")
             break
         else:
             raise RuntimeError(
@@ -273,6 +409,9 @@ def _normalise_critique(plan_id: str, critique: Mapping[str, Any]) -> Dict[str, 
     issues = critique.get("issues")
     if issues:
         record["issues"] = [str(item) for item in issues]
+    tags = _derive_rationale_tags(critique)
+    if tags:
+        record["rationale_tags"] = tags
     return record
 
 
@@ -290,7 +429,29 @@ def _critique_memory_record(
         value = critique.get(key)
         if value:
             entry[key] = value
+    if critique.get("rationale_tags"):
+        entry["rationale_tags"] = critique["rationale_tags"]
     return entry
+
+
+def _derive_rationale_tags(critique: Mapping[str, Any]) -> List[str]:
+    tags: Set[str] = set()
+    for tag in critique.get("rationale_tags", []) or []:
+        text = str(tag).strip()
+        if text:
+            tags.add(text)
+    if critique.get("amendments"):
+        tags.add("amendment")
+    if critique.get("issues"):
+        tags.add("issue")
+    summary = str(critique.get("summary", "") or "")
+    notes = str(critique.get("notes", "") or "")
+    text_blob = f"{summary}\n{notes}".lower()
+    if "safety" in text_blob:
+        tags.add("safety")
+    if "alignment" in text_blob:
+        tags.add("alignment")
+    return sorted(tags)
 
 
 async def _execute_plan_steps(

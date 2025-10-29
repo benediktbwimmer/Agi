@@ -417,6 +417,95 @@ def test_orchestrator_recovers_from_execution_failure(tmp_path):
     ]
 
 
+def test_orchestrator_populates_working_memory(tmp_path):
+    plan_response = {
+        "plans": [
+            {
+                "id": "plan-a",
+                "claim_ids": ["claim-a"],
+                "steps": [
+                    {
+                        "id": "step-a",
+                        "tool": "analysis",
+                        "args": {},
+                        "safety_level": "T0",
+                    }
+                ],
+                "expected_cost": {},
+                "risks": [],
+                "ablations": [],
+            }
+        ]
+    }
+
+    planner = Planner(llm=lambda payload: json.dumps(plan_response))
+    critic_calls = {"count": 0}
+
+    def critic_llm(plan: Dict[str, Any]) -> str:  # pragma: no cover - invoked indirectly
+        critic_calls["count"] += 1
+        if critic_calls["count"] == 1:
+            return json.dumps(
+                {
+                    "status": "FAIL",
+                    "summary": "Safety concerns identified",
+                    "issues": ["Unsafe preconditions"],
+                }
+            )
+        return json.dumps({"status": "PASS"})
+
+    critic = Critic(llm=critic_llm)
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    world_model = WorldModel()
+    tool = StubTool(ok=True)
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools={"analysis": tool},
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+        max_replans=2,
+    )
+
+    report = asyncio.run(
+        orchestrator.run(
+            {
+                "goal": "Assess options",
+                "hypotheses": [
+                    {"id": "hyp-1", "statement": "Option A is viable"},
+                ],
+            },
+            {},
+        )
+    )
+
+    assert report.summary == "Completed run"
+
+    working = orchestrator.working_memory
+    assert working is not None
+    assert working.goal == "Assess options"
+    assert len(working.hypotheses) == 1
+    assert len(working.attempts) == 2
+
+    first_attempt, second_attempt = working.attempts
+    assert first_attempt.status == "needs_replan"
+    assert first_attempt.critiques and first_attempt.critiques[0]["status"] == "FAIL"
+    first_plan = first_attempt.plans[0]
+    assert first_plan.approved is False
+    assert "issue" in first_plan.rationale_tags
+    assert "safety" in first_plan.rationale_tags
+    assert first_plan.execution_succeeded is None
+
+    assert second_attempt.status == "complete"
+    second_plan = second_attempt.plans[0]
+    assert second_plan.approved is True
+    assert second_plan.execution_succeeded is True
+
+    snapshot = working.to_dict()
+    assert snapshot["goal"] == "Assess options"
+    assert snapshot["attempts"][0]["plans"][0]["rationale_tags"]
+
+
 def test_orchestrator_builds_memory_context_for_planner(tmp_path):
     captured: Dict[str, Any] = {}
 
