@@ -247,6 +247,98 @@ class MemoryStore:
         limited = ranked_indices[:limit]
         return [json.loads(json.dumps(self._records[idx])) for idx in limited]
 
+    def search(
+        self,
+        *,
+        query: str | None = None,
+        start: datetime | str | None = None,
+        end: datetime | str | None = None,
+        types: Iterable[str] | None = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve records using lexical and temporal constraints.
+
+        ``query`` performs lexical matching similar to :meth:`semantic_search` but
+        allows additional ``start``/``end`` time filters and ``types`` filtering.
+        When ``query`` is omitted, the method falls back to a purely temporal
+        search returning records in chronological order.
+        """
+
+        if limit <= 0:
+            return []
+
+        type_filter = {t for t in types} if types is not None else None
+
+        start_dt = _coerce_datetime(start) if start is not None else None
+        end_dt = _coerce_datetime(end) if end is not None else None
+        if start_dt is not None and end_dt is not None and start_dt > end_dt:
+            start_dt, end_dt = end_dt, start_dt
+
+        def _time_filter(record_idx: int) -> bool:
+            record_time = self._record_times[record_idx]
+            if start_dt is not None and (
+                record_time is None or record_time < start_dt
+            ):
+                return False
+            if end_dt is not None and (
+                record_time is None or record_time > end_dt
+            ):
+                return False
+            return True
+
+        def _type_filter(record: Mapping[str, Any]) -> bool:
+            if type_filter is None:
+                return True
+            return record.get("type") in type_filter
+
+        if query is None or not query.strip():
+            if not self._time_records:
+                return []
+
+            if start_dt is None:
+                start_idx = 0
+            else:
+                start_idx = bisect_left(self._time_keys, start_dt)
+            if end_dt is None:
+                end_idx = len(self._time_records)
+            else:
+                end_idx = bisect_right(self._time_keys, end_dt)
+
+            results: List[Dict[str, Any]] = []
+            for record in self._time_records[start_idx:end_idx]:
+                if not _type_filter(record):
+                    continue
+                results.append(json.loads(json.dumps(record)))
+                if len(results) >= limit:
+                    break
+            return results
+
+        tokens = _tokenise(query)
+        if not tokens:
+            return []
+
+        scores: Counter[int] = Counter()
+        for token in tokens:
+            for record_idx in self._token_index.get(token, []):
+                record = self._records[record_idx]
+                if not _type_filter(record):
+                    continue
+                if not _time_filter(record_idx):
+                    continue
+                scores[record_idx] += 1
+
+        if not scores:
+            return []
+
+        def _sort_key(index: int) -> tuple[int, float, int]:
+            timestamp = self._record_times[index]
+            ts_key = timestamp.timestamp() if timestamp is not None else float("-inf")
+            return (-scores[index], -ts_key, -index)
+
+        ranked_indices = sorted(scores, key=_sort_key)
+        limited = ranked_indices[:limit]
+        return [json.loads(json.dumps(self._records[idx])) for idx in limited]
+
     def _index_record(self, record: Dict[str, Any]) -> None:
         stored_record = json.loads(json.dumps(record))
         self._records.append(stored_record)
