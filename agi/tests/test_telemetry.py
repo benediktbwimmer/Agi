@@ -11,6 +11,7 @@ from agi.src.core.planner import Planner
 from agi.src.core.telemetry import InMemorySink, JsonLinesSink, Telemetry
 from agi.src.core.types import ToolResult
 from agi.src.core.world_model import WorldModel
+from agi.src.governance.gatekeeper import Gatekeeper
 
 
 class _StubTool:
@@ -28,7 +29,12 @@ class _StubTool:
         )
 
 
-def _build_orchestrator(tmp_path: Path, sink: InMemorySink) -> Orchestrator:
+def _build_orchestrator(
+    tmp_path: Path,
+    sink: InMemorySink,
+    *,
+    gatekeeper: Gatekeeper | None = None,
+) -> Orchestrator:
     planner_payload = {
         "plans": [
             {
@@ -57,6 +63,7 @@ def _build_orchestrator(tmp_path: Path, sink: InMemorySink) -> Orchestrator:
         world_model=world_model,
         working_dir=tmp_path,
         telemetry=telemetry,
+        gatekeeper=gatekeeper,
     )
     return orchestrator
 
@@ -79,6 +86,19 @@ def test_orchestrator_emits_structured_events(tmp_path: Path) -> None:
     tool_started = next(event for event in events if event["event"] == "orchestrator.tool_started")
     assert "provenance" in tool_started
     assert tool_started["provenance"]["plan"]["id"]
+
+
+def test_orchestrator_emits_risk_events(tmp_path: Path) -> None:
+    sink = InMemorySink()
+    gatekeeper = Gatekeeper(policy={})
+    orchestrator = _build_orchestrator(tmp_path, sink, gatekeeper=gatekeeper)
+
+    asyncio.run(orchestrator.run({"goal": "demo"}, {}))
+
+    events = [event for event in sink.events if event["event"] == "orchestrator.risk_assessed"]
+    assert events, "expected risk assessment event"
+    assert events[0]["approved"] is True
+    assert events[0]["effective_level"] == "T0"
 
 
 def test_json_lines_sink_writes_file(tmp_path: Path) -> None:

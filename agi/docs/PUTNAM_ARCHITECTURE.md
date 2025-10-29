@@ -88,6 +88,14 @@ policy enforce alignment.
 2. Provide simulation tools (see `agi/src/core/tools/sim_physics.py`) to test
    candidate actions before committing to real-world execution.
 
+### Recent Progress
+
+* **Runtime risk loop (`agi/src/core/orchestrator.py`)** – The orchestrator now
+  performs a gatekeeper-backed risk assessment immediately before every tool
+  invocation, emits telemetry events, and records the outcome in working
+  memory and manifests. This realises Putnam's emphasis on contextual action
+  selection by letting policies react to evolving conditions during execution.
+
 ## 5. Reflective Learning Layer
 
 Putnam highlights continual self-improvement through reflection on outcomes.

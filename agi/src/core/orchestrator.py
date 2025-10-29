@@ -11,7 +11,12 @@ from .manifest import RunManifest
 from .memory import MemoryStore
 from .memory_retrieval import MemoryRetriever
 from .planner import Planner
-from .safety import SafetyDecision, enforce_plan_safety
+from .safety import (
+    RiskAssessment,
+    SafetyDecision,
+    assess_step_risk,
+    enforce_plan_safety,
+)
 from .tools import describe_tool
 from .telemetry import Telemetry
 from .types import BranchCondition, Plan, PlanStep, Report, RunContext, ToolResult
@@ -152,6 +157,7 @@ class DeliberationAttempt:
     plans: List[PlanTrace] = field(default_factory=list)
     critiques: List[Dict[str, Any]] = field(default_factory=list)
     execution_feedback: List[Dict[str, Any]] = field(default_factory=list)
+    risk_assessments: List[Dict[str, Any]] = field(default_factory=list)
     _plan_index: Dict[str, PlanTrace] = field(default_factory=dict, init=False, repr=False)
 
     def register_plan(self, plan: Plan) -> PlanTrace:
@@ -183,6 +189,9 @@ class DeliberationAttempt:
             if plan is not None:
                 plan.mark_execution(succeeded)
 
+    def record_risk_assessment(self, assessment: RiskAssessment) -> None:
+        self.risk_assessments.append(assessment.as_dict())
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "index": self.index,
@@ -190,6 +199,7 @@ class DeliberationAttempt:
             "plans": [plan.to_dict() for plan in self.plans],
             "critiques": [dict(item) for item in self.critiques],
             "execution_feedback": [dict(item) for item in self.execution_feedback],
+            "risk_assessments": [dict(item) for item in self.risk_assessments],
         }
 
 
@@ -291,6 +301,7 @@ class Orchestrator:
         tool_results: List[ToolResult] = []
         plan_results: Dict[str, List[ToolResult]] = {}
         safety_audit: List[SafetyDecision] = []
+        risk_assessments: List[RiskAssessment] = []
 
         self._working_memory = WorkingMemory(
             run_id=run_id,
@@ -413,6 +424,8 @@ class Orchestrator:
                     memory_entries=attempt_memory_entries,
                     result_index=result_index,
                     run_id=run_id,
+                    risk_assessments=risk_assessments,
+                    working_attempt=working_attempt,
                 )
 
             memory_entries.extend(attempt_memory_entries)
@@ -492,6 +505,7 @@ class Orchestrator:
             tool_results=tool_results,
             belief_updates=updates,
             safety_audit=safety_audit,
+            risk_assessments=risk_assessments,
             critiques=critiques,
             tool_catalog=tool_catalog,
         )
@@ -600,6 +614,8 @@ async def _execute_plan_steps(
     memory_entries: List[Dict[str, Any]],
     result_index: Dict[str, ToolResult],
     run_id: str,
+    risk_assessments: List[RiskAssessment],
+    working_attempt: DeliberationAttempt,
 ) -> None:
     for step in steps:
         await _execute_plan_step(
@@ -614,6 +630,8 @@ async def _execute_plan_steps(
             memory_entries=memory_entries,
             result_index=result_index,
             run_id=run_id,
+            risk_assessments=risk_assessments,
+            working_attempt=working_attempt,
         )
 
 
@@ -630,11 +648,61 @@ async def _execute_plan_step(
     memory_entries: List[Dict[str, Any]],
     result_index: Dict[str, ToolResult],
     run_id: str,
+    risk_assessments: List[RiskAssessment],
+    working_attempt: DeliberationAttempt,
 ) -> None:
     if step.tool:
         tool = orchestrator.tools.get(step.tool)
         if tool is None:
             raise KeyError(f"Unknown tool {step.tool}")
+        if orchestrator.gatekeeper is not None:
+            assessment = assess_step_risk(plan, step, orchestrator.tools, orchestrator.gatekeeper)
+            risk_assessments.append(assessment)
+            working_attempt.record_risk_assessment(assessment)
+            orchestrator._emit(
+                "orchestrator.risk_assessed",
+                run_id=run_id,
+                plan_id=plan.id,
+                step_id=step.id,
+                tool=step.tool,
+                approved=assessment.approved,
+                effective_level=assessment.effective_level,
+                reason=assessment.reason,
+            )
+            risk_entry: Dict[str, Any] = {
+                "type": "risk_assessment",
+                "plan_id": plan.id,
+                "step_id": step.id,
+                "tool": step.tool,
+                "approved": assessment.approved,
+                "requested_level": assessment.requested_level,
+                "tool_level": assessment.tool_level,
+                "effective_level": assessment.effective_level,
+                "time": goal_spec.get("time", "1970-01-01T00:00:00+00:00"),
+            }
+            if assessment.reason:
+                risk_entry["reason"] = assessment.reason
+            memory_entries.append(risk_entry)
+            if not assessment.approved:
+                failure = ToolResult(
+                    call_id=step.id,
+                    ok=False,
+                    stdout=assessment.reason or "Risk assessment blocked execution",
+                )
+                per_plan_results.append(failure)
+                all_results.append(failure)
+                result_index[step.id] = failure
+                result_index[failure.call_id] = failure
+                orchestrator._emit(
+                    "orchestrator.tool_blocked",
+                    run_id=run_id,
+                    plan_id=plan.id,
+                    step_id=step.id,
+                    tool=step.tool,
+                    effective_level=assessment.effective_level,
+                    reason=assessment.reason,
+                )
+                return
         ctx = RunContext(
             working_dir=str(run_dir),
             timeout_s=int(constraints.get("timeout_s", goal_spec.get("timeout_s", 60))),
@@ -654,6 +722,7 @@ async def _execute_plan_step(
         result = await tool.run({**step.args, "id": step.id}, ctx)
         per_plan_results.append(result)
         all_results.append(result)
+        result_index[step.id] = result
         result_index[result.call_id] = result
         orchestrator._emit(
             "orchestrator.tool_completed",
@@ -691,6 +760,8 @@ async def _execute_plan_step(
             memory_entries=memory_entries,
             result_index=result_index,
             run_id=run_id,
+            risk_assessments=risk_assessments,
+            working_attempt=working_attempt,
         )
 
     for branch in step.branches:
@@ -707,6 +778,8 @@ async def _execute_plan_step(
                 memory_entries=memory_entries,
                 result_index=result_index,
                 run_id=run_id,
+                risk_assessments=risk_assessments,
+                working_attempt=working_attempt,
             )
 
 
