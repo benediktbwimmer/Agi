@@ -2,9 +2,57 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import re
+from statistics import mean
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from .memory import MemoryStore, _normalise_time
+from .memory import MemoryStore, _extract_text, _normalise_time
+
+
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+")
+
+
+def _tokenise(text: str) -> set[str]:
+    return {match.group(0).lower() for match in _TOKEN_PATTERN.finditer(text)}
+
+
+def _confidence_for_record(query_tokens: set[str], record: Mapping[str, Any]) -> float:
+    if not query_tokens:
+        return 0.0
+    record_tokens = _tokenise(_extract_text(record))
+    if not record_tokens:
+        return 0.0
+    overlap = len(query_tokens.intersection(record_tokens))
+    if overlap == 0:
+        return 0.0
+    coverage = overlap / len(query_tokens)
+    density = overlap / len(record_tokens)
+    score = (coverage * 0.7) + (density * 0.3)
+    return max(0.0, min(1.0, round(score, 4)))
+
+
+def _summarise_confidence(confidences: Sequence[float]) -> Dict[str, float]:
+    if not confidences:
+        return {}
+    summary = {
+        "min": round(min(confidences), 4),
+        "max": round(max(confidences), 4),
+        "mean": round(mean(confidences), 4),
+        "count": len(confidences),
+    }
+    nonzero = sum(1 for value in confidences if value > 0)
+    summary["nonzero_fraction"] = round(nonzero / len(confidences), 4)
+    return summary
+
+
+def _annotate_confidence(query: str, records: List[Dict[str, Any]]) -> Dict[str, float]:
+    tokens = _tokenise(query)
+    confidences: List[float] = []
+    for record in records:
+        score = _confidence_for_record(tokens, record)
+        record["confidence"] = score
+        confidences.append(score)
+    return _summarise_confidence(confidences)
 
 
 def _normalise_limit(value: Optional[int], default: int) -> int:
@@ -69,6 +117,7 @@ class MemorySlice:
     matches: List[Dict[str, Any]]
     coverage: Dict[str, int] = field(default_factory=dict)
     window: Dict[str, Optional[str]] | None = None
+    confidence_summary: Dict[str, float] = field(default_factory=dict)
 
     def to_payload(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -78,6 +127,8 @@ class MemorySlice:
         }
         if self.window:
             payload["window"] = dict(self.window)
+        if self.confidence_summary:
+            payload["confidence"] = dict(self.confidence_summary)
         return payload
 
 
@@ -166,10 +217,17 @@ class MemoryRetriever:
                 break
 
         coverage = _compute_coverage(filtered)
+        confidence_summary = _annotate_confidence(query, filtered)
         window_meta: Dict[str, Optional[str]] | None = None
         if since or until:
             window_meta = {"since": since, "until": until}
-        return MemorySlice(query=query, matches=filtered, coverage=coverage, window=window_meta)
+        return MemorySlice(
+            query=query,
+            matches=filtered,
+            coverage=coverage,
+            window=window_meta,
+            confidence_summary=confidence_summary,
+        )
 
     def timeline(
         self,
