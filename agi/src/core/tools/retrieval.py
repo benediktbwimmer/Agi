@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set
 
 from . import ToolCapability, ToolParameter, ToolSpec
 from ..memory import MemoryStore
@@ -20,7 +20,7 @@ def _normalise_limit(value: Any, default: int, maximum: int) -> int:
     return min(limit, maximum)
 
 
-def _parse_types(value: Any) -> Iterable[str] | None:
+def _parse_string_sequence(value: Any) -> Iterable[str] | None:
     if value is None:
         return None
     if isinstance(value, str):
@@ -60,6 +60,21 @@ def _record_hash(record: Dict[str, Any]) -> str:
     return json.dumps(record, sort_keys=True, default=str)
 
 
+def _record_tools(record: Mapping[str, Any]) -> Set[str]:
+    tools: Set[str] = set()
+    tool_name = record.get("tool")
+    if isinstance(tool_name, str) and tool_name:
+        tools.add(tool_name)
+    trace = record.get("trace")
+    if isinstance(trace, Sequence):
+        for step in trace:
+            if isinstance(step, Mapping):
+                trace_tool = step.get("tool")
+                if isinstance(trace_tool, str) and trace_tool:
+                    tools.add(trace_tool)
+    return tools
+
+
 @dataclass
 class RetrievalTool:
     """Memory-backed retrieval tool providing semantic and temporal search."""
@@ -73,7 +88,9 @@ class RetrievalTool:
     async def run(self, args: Dict[str, Any], ctx: RunContext) -> ToolResult:
         query = (args.get("query") or "").strip()
         limit = _normalise_limit(args.get("limit"), self.default_limit, self.max_limit)
-        type_filter = _parse_types(args.get("types"))
+        type_filter = _parse_string_sequence(args.get("types"))
+        tool_filter_raw = _parse_string_sequence(args.get("tools"))
+        tool_filter = {tool for tool in tool_filter_raw} if tool_filter_raw else None
         since = _parse_time(args.get("since") or args.get("start"))
         until = _parse_time(args.get("until") or args.get("end"))
         claim_id = args.get("claim_id")
@@ -116,6 +133,8 @@ class RetrievalTool:
                 record_type = record.get("type")
                 if record_type not in type_filter:
                     continue
+            if tool_filter is not None and not (_record_tools(record) & tool_filter):
+                continue
             record_time = _parse_time(record.get("time"))
             if since and (record_time is None or record_time < since):
                 continue
@@ -170,6 +189,16 @@ class RetrievalTool:
                         ],
                         "description": "Optional record type filter.",
                     },
+                    "tools": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        ],
+                        "description": "Restrict results to records referencing specific tools.",
+                    },
                     "since": {"type": "string", "format": "date-time"},
                     "until": {"type": "string", "format": "date-time"},
                     "claim_id": {"type": "string"},
@@ -216,6 +245,20 @@ class RetrievalTool:
                             description="ISO timestamp upper bound for record time.",
                             required=False,
                             schema={"type": "string", "format": "date-time"},
+                        ),
+                        ToolParameter(
+                            name="tools",
+                            description="Restrict results to records involving the specified tools.",
+                            required=False,
+                            schema={
+                                "oneOf": [
+                                    {"type": "string"},
+                                    {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                ]
+                            },
                         ),
                     ),
                     outputs=("data.records",),

@@ -96,3 +96,39 @@ def test_retrieval_filters_by_time_and_claim(tmp_path: Path) -> None:
     records = result.data["records"]
     assert len(records) == 1
     assert records[0]["call_id"] == "recent"
+
+
+def test_retrieval_filters_by_tools(tmp_path: Path) -> None:
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    _append_episode(
+        memory,
+        call_id="python",
+        tool="python_runner",
+        stdout="Python execution",
+        time="2024-06-01T12:00:00+00:00",
+    )
+    _append_episode(
+        memory,
+        call_id="calc",
+        tool="calculator",
+        stdout="Calculator execution",
+        time="2024-06-02T12:00:00+00:00",
+    )
+    _append_episode(
+        memory,
+        call_id="trace",
+        tool="analysis",
+        stdout="Trace execution",
+        time="2024-06-03T12:00:00+00:00",
+        trace=[{"tool": "retrieval"}, {"tool": "python_runner"}],
+    )
+    tool = RetrievalTool(memory)
+    ctx = _run_ctx(tmp_path)
+
+    calc_result = asyncio.run(tool.run({"tools": "calculator"}, ctx))
+    calc_records = [record["call_id"] for record in calc_result.data["records"]]
+    assert calc_records == ["calc"]
+
+    trace_result = asyncio.run(tool.run({"tools": ["retrieval"]}, ctx))
+    trace_records = [record["call_id"] for record in trace_result.data["records"]]
+    assert trace_records == ["trace"]
