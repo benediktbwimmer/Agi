@@ -44,6 +44,8 @@ class WorldModel:
                     credence=0.5,
                     evidence=[],
                     last_updated=update_time_iso,
+                    support=0.0,
+                    conflict=0.0,
                 ),
             )
             weight = _resolve_weight(
@@ -61,11 +63,15 @@ class WorldModel:
             timestamp = _resolve_update_timestamp(
                 result.get("timestamp"), default=update_time_iso
             )
+            support = prior.support + (weight if passed else 0.0)
+            conflict = prior.conflict + (weight if not passed else 0.0)
             belief = Belief(
                 claim_id=claim_id,
                 credence=posterior,
                 evidence=evidence,
                 last_updated=timestamp,
+                support=support,
+                conflict=conflict,
             )
             self._beliefs[claim_id] = belief
             updated.append(belief)
@@ -97,6 +103,8 @@ class WorldModel:
                 credence=float(item.get("credence", 0.5)),
                 evidence=evidence,
                 last_updated=item.get("last_updated", datetime.now(timezone.utc).isoformat()),
+                support=float(item.get("support", 0.0)),
+                conflict=float(item.get("conflict", 0.0)),
             )
             beliefs[belief.claim_id] = belief
         self._beliefs = beliefs
@@ -139,6 +147,8 @@ class WorldModel:
             "credence": belief.credence,
             "last_updated": belief.last_updated,
             "evidence": [asdict(src) for src in belief.evidence],
+            "support": belief.support,
+            "conflict": belief.conflict,
         }
 
 
