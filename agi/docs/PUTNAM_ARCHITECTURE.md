@@ -42,6 +42,13 @@ records in memory and updating the world model.
 2. Introduce confidence scoring in memory retrieval to prioritise reliable
    abstractions when forming plan contexts.
 
+### Recent Progress
+
+* **Confidence-aware retrieval (`agi/src/core/memory_retrieval.py`)** – Semantic
+  slices now annotate each match with a lexical confidence score along with
+  aggregate statistics surfaced to planners and telemetry. This allows the
+  orchestrator to weight contextual evidence during hypothesis formation.
+
 ## 3. Cognitive Workspace Layer
 
 Putnam emphasises a workspace where competing hypotheses are evaluated against

@@ -36,6 +36,10 @@ def test_search_applies_tool_and_time_filters(memory_store: MemoryStore) -> None
     retriever = MemoryRetriever(memory_store)
     slice_all = retriever.search("result", limit=5)
     assert len(slice_all.matches) == 3
+    confidences = [match["confidence"] for match in slice_all.matches]
+    assert all(0.0 <= value <= 1.0 for value in confidences)
+    assert slice_all.confidence_summary["count"] == 3
+    assert slice_all.confidence_summary["nonzero_fraction"] > 0
 
     filtered = retriever.search(
         "result",
@@ -50,6 +54,7 @@ def test_search_applies_tool_and_time_filters(memory_store: MemoryStore) -> None
         "since": "2024-01-01T02:00:00+00:00",
         "until": "2024-01-01T02:00:00+00:00",
     }
+    assert filtered.confidence_summary["count"] == 1
 
 
 def test_timeline_respects_limits(memory_store: MemoryStore) -> None:
