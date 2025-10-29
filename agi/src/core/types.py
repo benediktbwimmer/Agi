@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Protocol, TypedDict
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Protocol, TypedDict
 
 
 UID = str
@@ -121,7 +122,7 @@ class BranchCondition:
                 return False
             return str(self.value) in result.stdout
         if self.kind == "expression":
-            return str(self.value).lower() in {"true", "always"}
+            return _evaluate_expression(str(self.value or ""), results)
         return False
 
     def to_payload(self) -> Any:
@@ -135,6 +136,151 @@ class BranchCondition:
         if self.value is not None:
             payload["value"] = self.value
         return payload
+
+
+class _ResultView:
+    """Lightweight proxy exposing safe attributes of a :class:`ToolResult`."""
+
+    __slots__ = ("_result",)
+
+    def __init__(self, result: ToolResult | None):
+        self._result = result
+
+    @property
+    def ok(self) -> bool:
+        return bool(self._result and self._result.ok)
+
+    @property
+    def failed(self) -> bool:
+        return not self.ok
+
+    @property
+    def stdout(self) -> Optional[str]:
+        return None if self._result is None else self._result.stdout
+
+    @property
+    def data(self) -> Any:
+        return None if self._result is None else self._result.data
+
+    @property
+    def call_id(self) -> Optional[str]:
+        return None if self._result is None else self._result.call_id
+
+    def __bool__(self) -> bool:  # pragma: no cover - indirect through expression evaluation
+        return self.ok
+
+    def __getitem__(self, key: Any) -> Any:
+        if key in {"ok", "failed", "stdout", "data", "call_id"}:
+            return getattr(self, key)
+        raise KeyError(key)
+
+
+def _evaluate_expression(expression: str, results: Mapping[str, "ToolResult"]) -> bool:
+    expression = expression.strip()
+    if not expression:
+        return False
+
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError:
+        return False
+
+    def result_lookup(step_id: Any) -> _ResultView:
+        return _ResultView(results.get(str(step_id)))
+
+    def contains(value: Any, needle: Any) -> bool:
+        if value is None:
+            return False
+        try:
+            haystack = "".join(value) if isinstance(value, (list, tuple, set)) else str(value)
+        except Exception:  # pragma: no cover - defensive
+            haystack = str(value)
+        return str(needle) in haystack
+
+    env_functions: Dict[str, Callable[..., Any]] = {
+        "result": result_lookup,
+        "contains": contains,
+    }
+
+    constants: Dict[str, Any] = {"True": True, "False": False, "None": None}
+
+    def _eval(node: ast.AST) -> Any:
+        if isinstance(node, ast.BoolOp):
+            values = [_eval(value) for value in node.values]
+            if isinstance(node.op, ast.And):
+                return all(values)
+            if isinstance(node.op, ast.Or):
+                return any(values)
+            raise ValueError
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return not bool(_eval(node.operand))
+        if isinstance(node, ast.Compare):
+            left = _eval(node.left)
+            for op, comparator in zip(node.ops, node.comparators):
+                right = _eval(comparator)
+                if isinstance(op, ast.Eq):
+                    ok = left == right
+                elif isinstance(op, ast.NotEq):
+                    ok = left != right
+                elif isinstance(op, ast.Gt):
+                    ok = left > right
+                elif isinstance(op, ast.GtE):
+                    ok = left >= right
+                elif isinstance(op, ast.Lt):
+                    ok = left < right
+                elif isinstance(op, ast.LtE):
+                    ok = left <= right
+                elif isinstance(op, ast.In):
+                    ok = left in right
+                elif isinstance(op, ast.NotIn):
+                    ok = left not in right
+                elif isinstance(op, ast.Is):
+                    ok = left is right
+                elif isinstance(op, ast.IsNot):
+                    ok = left is not right
+                else:
+                    raise ValueError
+                if not ok:
+                    return False
+                left = right
+            return True
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name):
+                raise ValueError
+            name = node.func.id
+            func = env_functions.get(name)
+            if func is None:
+                raise ValueError
+            args = [_eval(arg) for arg in node.args]
+            kwargs = {kw.arg: _eval(kw.value) for kw in node.keywords}
+            return func(*args, **kwargs)
+        if isinstance(node, ast.Attribute):
+            value = _eval(node.value)
+            if not hasattr(value, node.attr):
+                raise ValueError
+            return getattr(value, node.attr)
+        if isinstance(node, ast.Subscript):
+            value = _eval(node.value)
+            index = _eval(node.slice)
+            return value[index]
+        if isinstance(node, ast.Name):
+            if node.id in constants:
+                return constants[node.id]
+            raise ValueError
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.List):
+            return [_eval(elt) for elt in node.elts]
+        if isinstance(node, ast.Tuple):
+            return tuple(_eval(elt) for elt in node.elts)
+        if isinstance(node, ast.Dict):
+            return {_eval(k): _eval(v) for k, v in zip(node.keys, node.values)}
+        raise ValueError
+
+    try:
+        return bool(_eval(tree.body))
+    except (ValueError, KeyError, TypeError):
+        return False
 
 
 @dataclass
