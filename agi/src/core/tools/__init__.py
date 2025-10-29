@@ -28,6 +28,16 @@ class ToolParameter:
 
 
 @dataclass(frozen=True)
+class SensorProfile:
+    """Describes the sensory characteristics of a tool interface."""
+
+    modality: str
+    latency_ms: int | None = None
+    trust: str = "provisional"
+    description: str | None = None
+
+
+@dataclass(frozen=True)
 class ToolCapability:
     """A unit of functionality exposed by a tool."""
 
@@ -50,6 +60,32 @@ class ToolSpec:
     output_schema: Mapping[str, Any] = field(default_factory=dict)
     capabilities: Sequence[ToolCapability] = field(default_factory=tuple)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    sensor_profile: SensorProfile | None = None
+
+
+def _normalise_sensor_profile(profile: SensorProfile | Mapping[str, Any] | None) -> SensorProfile | None:
+    if profile is None:
+        return None
+    if isinstance(profile, Mapping):
+        profile = SensorProfile(**profile)
+    if not isinstance(profile, SensorProfile):  # pragma: no cover - defensive
+        raise TypeError("sensor_profile must be a SensorProfile or mapping")
+    latency = profile.latency_ms
+    if latency is not None:
+        latency = int(latency)
+        if latency < 0:
+            raise ValueError("sensor_profile.latency_ms must be non-negative")
+    trust = str(profile.trust).strip().lower() or "provisional"
+    modality = str(profile.modality).strip() or "unknown"
+    description = profile.description
+    if description is not None:
+        description = str(description).strip() or None
+    return SensorProfile(
+        modality=modality,
+        latency_ms=latency,
+        trust=trust,
+        description=description,
+    )
 
 
 def _ensure_capabilities(spec: ToolSpec) -> Sequence[ToolCapability]:
@@ -88,6 +124,7 @@ def _normalise_spec(spec: ToolSpec) -> ToolSpec:
         output_schema=_copy_mapping(spec.output_schema),
         capabilities=_ensure_capabilities(spec),
         metadata=_copy_mapping(spec.metadata),
+        sensor_profile=_normalise_sensor_profile(spec.sensor_profile),
     )
 
 
@@ -109,6 +146,11 @@ def describe_tool(tool: Any, *, override_name: str | None = None) -> ToolSpec:
         name = getattr(tool, "name", tool.__class__.__name__)
         description = (getattr(tool, "__doc__", "") or str(name)).strip() or str(name)
         safety = _normalise_tier(getattr(tool, "safety", "T0"))
+        sensor_profile = SensorProfile(
+            modality=str(getattr(tool, "modality", "unknown")),
+            latency_ms=_getattr_int(tool, "latency_ms"),
+            trust=str(getattr(tool, "trust", "provisional")),
+        )
         spec = ToolSpec(
             name=name,
             description=description,
@@ -120,6 +162,7 @@ def describe_tool(tool: Any, *, override_name: str | None = None) -> ToolSpec:
                     safety_tier=safety,
                 ),
             ),
+            sensor_profile=sensor_profile,
         )
 
     spec = _normalise_spec(spec)
@@ -128,7 +171,18 @@ def describe_tool(tool: Any, *, override_name: str | None = None) -> ToolSpec:
     return spec
 
 
+def _getattr_int(obj: Any, attr: str) -> int | None:
+    value = getattr(obj, attr, None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return None
+
+
 __all__ = [
+    "SensorProfile",
     "ToolCapability",
     "ToolParameter",
     "ToolSpec",

@@ -4,7 +4,7 @@ import ast
 import operator
 from typing import Any, Dict
 
-from . import ToolCapability, ToolParameter, ToolSpec
+from . import SensorProfile, ToolCapability, ToolParameter, ToolSpec
 from ..types import RunContext, ToolResult
 
 
@@ -34,6 +34,12 @@ class Calculator:
             name=self.name,
             description="Evaluate arithmetic expressions using a safe AST interpreter.",
             safety_tier=self.safety,
+            sensor_profile=SensorProfile(
+                modality="symbolic",
+                latency_ms=20,
+                trust="high",
+                description="Deterministic arithmetic evaluation",
+            ),
             input_schema={
                 "type": "object",
                 "properties": {

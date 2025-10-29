@@ -19,6 +19,94 @@ from .world_model import WorldModel
 from ..governance.gatekeeper import Gatekeeper
 
 
+def _truncate_text(value: Any, limit: int = 160) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "\u2026"
+
+
+def _summarise_memory_records(records: Iterable[Mapping[str, Any]], *, limit: int = 5) -> List[Dict[str, Any]]:
+    summary: List[Dict[str, Any]] = []
+    for record in list(records)[:limit]:
+        if not isinstance(record, Mapping):
+            continue
+        entry: Dict[str, Any] = {}
+        for key in ("id", "plan_id", "type", "tool", "time"):
+            value = record.get(key)
+            if isinstance(value, str) and value:
+                entry[key] = value
+        confidence = record.get("confidence")
+        if isinstance(confidence, (int, float)):
+            entry["confidence"] = round(float(confidence), 4)
+        for key in ("summary", "notes", "stdout"):
+            text = _truncate_text(record.get(key))
+            if text:
+                entry[key] = text
+        if entry:
+            summary.append(entry)
+    return summary
+
+
+def _summarise_memory_context(context: Mapping[str, Any] | None) -> Dict[str, Any] | None:
+    if not context:
+        return None
+    summary: Dict[str, Any] = {}
+    goal = context.get("goal")
+    if isinstance(goal, str) and goal.strip():
+        summary["goal"] = goal.strip()
+    semantic = context.get("semantic")
+    if isinstance(semantic, Mapping):
+        matches = semantic.get("matches")
+        if isinstance(matches, list):
+            semantic_summary = _summarise_memory_records(matches)
+            if semantic_summary:
+                summary["semantic_matches"] = semantic_summary
+        query = semantic.get("query")
+        if isinstance(query, str) and query.strip():
+            summary["semantic_query"] = query.strip()
+        confidence = semantic.get("confidence")
+        if isinstance(confidence, Mapping):
+            summary["semantic_confidence"] = {
+                key: float(value)
+                for key, value in confidence.items()
+                if isinstance(value, (int, float))
+            }
+    recent = context.get("recent")
+    if isinstance(recent, Mapping):
+        records = recent.get("records")
+        if isinstance(records, list):
+            recent_summary = _summarise_memory_records(records)
+            if recent_summary:
+                summary["recent_records"] = recent_summary
+    return summary or None
+
+
+def _build_input_provenance(
+    goal_spec: Mapping[str, Any],
+    hypotheses: Iterable[Any],
+    memory_context: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    provenance: Dict[str, Any] = {}
+    goal = goal_spec.get("goal")
+    if isinstance(goal, str) and goal.strip():
+        provenance["goal"] = goal.strip()
+    hypotheses_list = list(hypotheses)
+    if hypotheses_list:
+        provenance["hypotheses"] = json.loads(json.dumps(hypotheses_list))
+    memory_summary = _summarise_memory_context(memory_context)
+    if memory_summary:
+        provenance["memory"] = memory_summary
+    expected_unit = goal_spec.get("expected_unit")
+    if expected_unit:
+        provenance["expected_unit"] = expected_unit
+    return provenance
+
+
 @dataclass
 class PlanTrace:
     """Snapshot of deliberation information for a single plan."""
@@ -113,6 +201,7 @@ class WorkingMemory:
     goal: Optional[str]
     hypotheses: List[Any]
     attempts: List[DeliberationAttempt] = field(default_factory=list)
+    input_provenance: Dict[str, Any] | None = None
 
     def start_attempt(self, index: int) -> DeliberationAttempt:
         attempt = DeliberationAttempt(index=index)
@@ -120,12 +209,15 @@ class WorkingMemory:
         return attempt
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "run_id": self.run_id,
             "goal": self.goal,
             "hypotheses": json.loads(json.dumps(self.hypotheses)),
             "attempts": [attempt.to_dict() for attempt in self.attempts],
         }
+        if self.input_provenance is not None:
+            payload["input_provenance"] = json.loads(json.dumps(self.input_provenance))
+        return payload
 
 
 @dataclass
@@ -142,6 +234,7 @@ class Orchestrator:
     memory_retriever: MemoryRetriever | None = None
 
     _working_memory: WorkingMemory | None = field(init=False, default=None, repr=False)
+    _input_provenance: Dict[str, Any] | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.memory_retriever is None:
@@ -157,6 +250,22 @@ class Orchestrator:
 
         return self._working_memory
 
+    def _tool_event_provenance(self, plan: Plan, step: PlanStep) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if self._input_provenance:
+            payload["inputs"] = json.loads(json.dumps(self._input_provenance))
+        payload["plan"] = {
+            "id": plan.id,
+            "claims": list(plan.claim_ids),
+        }
+        step_payload: Dict[str, Any] = {"id": step.id}
+        if step.goal:
+            step_payload["goal"] = step.goal
+        if step.description:
+            step_payload["description"] = step.description
+        payload["step"] = step_payload
+        return payload
+
     async def run(self, goal_spec: Dict[str, Any], constraints: Dict[str, Any] | None = None) -> Report:
         constraints = constraints or {}
         run_id = uuid.uuid4().hex
@@ -169,7 +278,12 @@ class Orchestrator:
             for name, tool in sorted(self.tools.items(), key=lambda item: item[0])
         ]
 
-        hypotheses = goal_spec.get("hypotheses", [])
+        raw_hypotheses = goal_spec.get("hypotheses", [])
+        if raw_hypotheses is None:
+            raw_hypotheses = []
+        elif not isinstance(raw_hypotheses, list):
+            raw_hypotheses = [raw_hypotheses]
+        hypotheses = raw_hypotheses
         feedback: List[Dict[str, Any]] = []
         critiques: List[Dict[str, Any]] = []
         memory_entries: List[Dict[str, Any]] = []
@@ -183,6 +297,7 @@ class Orchestrator:
             goal=str(goal_spec.get("goal")) if goal_spec.get("goal") is not None else None,
             hypotheses=json.loads(json.dumps(hypotheses)),
         )
+        self._input_provenance = None
 
         memory_context_payload: Dict[str, Any] | None = None
         if self.memory_retriever is not None:
@@ -205,6 +320,24 @@ class Orchestrator:
                         semantic_matches=len(semantic_matches),
                         recent_records=len(recent_records),
                     )
+
+        self._input_provenance = _build_input_provenance(
+            goal_spec,
+            hypotheses,
+            memory_context_payload,
+        )
+        if not self._input_provenance:
+            self._input_provenance = None
+        if self._working_memory is not None and self._input_provenance is not None:
+            self._working_memory.input_provenance = json.loads(
+                json.dumps(self._input_provenance)
+            )
+        if self._input_provenance:
+            self._emit(
+                "orchestrator.input_provenance_ready",
+                run_id=run_id,
+                provenance=self._input_provenance,
+            )
 
         for attempt in range(self.max_replans + 1):
             working_attempt = self._working_memory.start_attempt(attempt)
@@ -509,12 +642,14 @@ async def _execute_plan_step(
             network=constraints.get("network", "off"),
             record_provenance=True,
         )
+        provenance_payload = orchestrator._tool_event_provenance(plan, step)
         orchestrator._emit(
             "orchestrator.tool_started",
             run_id=run_id,
             plan_id=plan.id,
             step_id=step.id,
             tool=step.tool,
+            provenance=provenance_payload,
         )
         result = await tool.run({**step.args, "id": step.id}, ctx)
         per_plan_results.append(result)
@@ -528,6 +663,7 @@ async def _execute_plan_step(
             tool=step.tool,
             ok=result.ok,
             wall_time_ms=result.wall_time_ms,
+            provenance=provenance_payload,
         )
         memory_entries.append(
             {

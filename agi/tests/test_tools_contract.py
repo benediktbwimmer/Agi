@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agi.src.core.tools import SensorProfile, describe_tool
 from agi.src.core.tools.python_runner import PythonRunner, PythonRunnerError
 from agi.src.core.types import RunContext
 
@@ -40,3 +41,25 @@ Path('/tmp/outside.txt').write_text('nope')
 """
     with pytest.raises(PythonRunnerError):
         asyncio.run(runner.run({"code": code}, ctx))
+
+
+def test_python_runner_describe_includes_sensor_profile(tmp_path: Path) -> None:
+    runner = PythonRunner(artifacts_root=tmp_path / "artifacts")
+    spec = runner.describe()
+    assert isinstance(spec.sensor_profile, SensorProfile)
+    assert spec.sensor_profile.modality == "code_execution"
+    assert spec.sensor_profile.trust == "medium"
+
+
+def test_describe_tool_fallback_adds_sensor_profile() -> None:
+    class MinimalTool:
+        name = "minimal"
+        safety = "T1"
+
+        async def run(self, args, ctx):  # pragma: no cover - interface requirement
+            raise RuntimeError("not implemented")
+
+    spec = describe_tool(MinimalTool())
+    assert isinstance(spec.sensor_profile, SensorProfile)
+    assert spec.sensor_profile.modality == "unknown"
+    assert spec.sensor_profile.trust == "provisional"
