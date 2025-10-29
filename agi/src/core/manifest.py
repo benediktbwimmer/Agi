@@ -17,7 +17,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
-from .safety import SafetyDecision
+from .safety import RiskAssessment, SafetyDecision
 from .tools import ToolSpec
 from .types import Belief, ToolResult
 
@@ -57,6 +57,19 @@ class ManifestBeliefUpdate(BaseModel):
 
 class ManifestSafetyDecision(BaseModel):
     """Serialised representation of :class:`SafetyDecision`."""
+
+    plan_id: str
+    step_id: str
+    tool_name: str
+    requested_level: str
+    tool_level: str
+    effective_level: str
+    approved: bool
+    reason: str | None = None
+
+
+class ManifestRiskAssessment(BaseModel):
+    """Serialised representation of :class:`RiskAssessment`."""
 
     plan_id: str
     step_id: str
@@ -120,6 +133,7 @@ class RunManifest(BaseModel):
     tool_results: Sequence[ManifestToolResult]
     belief_updates: Sequence[ManifestBeliefUpdate]
     safety_audit: Sequence[ManifestSafetyDecision] = Field(default_factory=list)
+    risk_assessments: Sequence[ManifestRiskAssessment] = Field(default_factory=list)
     critiques: Sequence[ManifestCritique] = Field(default_factory=list)
     tool_catalog: Sequence[ManifestToolSpec] = Field(default_factory=list)
 
@@ -144,6 +158,7 @@ class RunManifest(BaseModel):
         tool_results: Iterable[ToolResult],
         belief_updates: Iterable[Belief],
         safety_audit: Iterable[SafetyDecision],
+        risk_assessments: Iterable[RiskAssessment] | None = None,
         critiques: Iterable[Mapping[str, Any]] | None = None,
         tool_catalog: Iterable[ToolSpec] | Iterable[Mapping[str, Any]] | None = None,
     ) -> "RunManifest":
@@ -170,6 +185,7 @@ class RunManifest(BaseModel):
             tool_results=_normalise(tool_results),
             belief_updates=_normalise(belief_updates),
             safety_audit=_normalise(safety_audit),
+            risk_assessments=_normalise(risk_assessments or []),
             critiques=_normalise(critiques or []),
             tool_catalog=_normalise(tool_catalog or []),
         )
@@ -195,6 +211,7 @@ __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "ManifestBeliefUpdate",
     "ManifestCritique",
+    "ManifestRiskAssessment",
     "ManifestToolCapability",
     "ManifestToolParameter",
     "ManifestToolSpec",
