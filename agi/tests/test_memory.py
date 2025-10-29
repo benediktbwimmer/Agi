@@ -176,3 +176,63 @@ def test_temporal_window_respects_anchor_and_filters(memory_path: Path) -> None:
 
     with pytest.raises(ValueError):
         store.temporal_window()
+
+
+def test_search_supports_semantic_and_temporal_filters(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    store.append(
+        {
+            "type": "reflection",
+            "summary": "Outlined lunar base construction plan",
+            "time": (base + timedelta(minutes=0)).isoformat(),
+        }
+    )
+    store.append(
+        {
+            "type": "reflection",
+            "summary": "Drafted Martian research proposal",
+            "time": (base + timedelta(minutes=5)).isoformat(),
+        }
+    )
+    store.append(
+        {
+            "type": "episode",
+            "tool": "python_runner",
+            "stdout": "Processed lunar regolith sample",
+            "time": (base + timedelta(minutes=10)).isoformat(),
+        }
+    )
+
+    matches = store.search(
+        query="lunar plan",
+        start=base,
+        end=base + timedelta(minutes=6),
+        types=["reflection"],
+    )
+
+    assert len(matches) == 1
+    assert matches[0]["summary"].startswith("Outlined lunar base")
+
+
+def test_search_without_query_defaults_to_temporal(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    for idx in range(3):
+        store.append(
+            {
+                "type": "episode" if idx < 2 else "reflection",
+                "time": (base + timedelta(minutes=idx)).isoformat(),
+                "payload": idx,
+            }
+        )
+
+    results = store.search(
+        start=base + timedelta(minutes=1),
+        end=base + timedelta(minutes=2),
+        types=["episode", "reflection"],
+        limit=2,
+    )
+
+    assert [entry["payload"] for entry in results] == [1, 2]
