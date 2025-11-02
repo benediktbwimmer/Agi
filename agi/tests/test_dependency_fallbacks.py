@@ -13,10 +13,10 @@ def _restore_module(name: str, module) -> None:
 
 
 def test_pydantic_fallback_basics() -> None:
-    module = importlib.import_module("pydantic")
-    assert hasattr(module, "USING_PYDANTIC_FALLBACK")
+    fallback = importlib.import_module("agi.src.pydantic._fallback")
+    assert fallback.USING_PYDANTIC_FALLBACK is True
 
-    class Item(module.BaseModel):
+    class Item(fallback.BaseModel):
         value: int
 
     instance = Item(value=7)
@@ -54,9 +54,9 @@ def test_pydantic_loader_prefers_real_package(tmp_path: Path) -> None:
 
 
 def test_typer_fallback_basics() -> None:
-    module = importlib.import_module("typer")
-    assert hasattr(module, "USING_TYPER_FALLBACK")
-    app = module.Typer()
+    fallback = importlib.import_module("agi.src.typer._fallback")
+    assert fallback.USING_TYPER_FALLBACK is True
+    app = fallback.Typer()
 
     @app.command()
     def ping() -> None:  # pragma: no cover - executed via Typer

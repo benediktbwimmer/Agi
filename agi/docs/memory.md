@@ -33,6 +33,17 @@ persists significant episodes, and exposes the relevant slices to tools via the
   `RunContext.recall_from_episodic(...)`, and the CLI can inspect, search, and
   summarise the log.
 
+When `faiss-cpu` is installed the semantic search path uses a hashed vector
+index (`MemoryVectorIndex`). Records that include an `embedding` payload are
+added to the vector index automatically, and semantic search responses expose
+`vector_similarity` scores alongside lexical hits. See
+`tests/test_orchestrator.py::test_orchestrator_surfaces_vector_similarity_in_memory_context`
+for an end-to-end example that asserts on those scores inside the planner
+payload.
+When no embedding is provided the index falls back to hashing the record text,
+so similarity metadata is still surfaced whenever the query shares vocabulary
+with the stored records.
+
 You can point the orchestrator at a different episodic file by passing a custom
 `MemoryStore` or by setting `Orchestrator.episodic_memory_path`.
 
