@@ -79,9 +79,23 @@ Useful commands:
 - `agi-cli working summarize path/to/working_memory.json` – summarise deliberation attempts captured in working-memory snapshots.
 - `agi-cli run inspect path/to/run_dir --memory path/to/memory.jsonl` – inspect a run directory with manifest, working memory, and optional contextual memory snippets.
 
+Useful environment toggles:
+
+```bash
+# disable the working/episodic memory integration if you want purely stateless runs
+export AGI_ENABLE_MEMORY=0
+```
+
+Re-enable memory (the default) with `AGI_ENABLE_MEMORY=1`.
+
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the multi-phase roadmap guiding future
 capability, safety, and governance development, and
 [docs/PUTNAM_ARCHITECTURE.md](docs/PUTNAM_ARCHITECTURE.md) for a layered cognitive
 architecture that maps Peter Putnam's inspiration onto the codebase.
+
+Additional guides:
+
+- [docs/memory.md](docs/memory.md) – working/episodic memory lifecycle, CLI walkthroughs, and targeted tests.
+- [docs/merging.md](docs/merging.md) – branch refresh checklist that keeps the merge guard green.

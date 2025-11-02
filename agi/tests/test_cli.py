@@ -437,3 +437,63 @@ def test_run_inspect_command(tmp_path: Path) -> None:
     assert payload["working_memory"]["run_id"] == "run-1"
     assert payload["reflection_summary"]["goal"] == "demo"
     assert payload["memory_context"]["goal"] == "demo"
+
+
+def test_memory_recent_type_filter(tmp_path: Path) -> None:
+    memory_path = tmp_path / "memory.jsonl"
+    store = MemoryStore(memory_path)
+    store.append(
+        {
+            "type": "episode",
+            "tool": "python_runner",
+            "time": "2024-01-01T00:00:00+00:00",
+            "stdout": "episode-only entry",
+        }
+    )
+
+    result = runner.invoke(
+        app,
+        ["memory", "recent", str(memory_path), "--limit", "1", "--type", "reflection"],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "No memory records found."
+
+
+def test_memory_search_with_filters(tmp_path: Path) -> None:
+    memory_path = tmp_path / "memory.jsonl"
+    store = MemoryStore(memory_path)
+    store.append(
+        {
+            "type": "reflection",
+            "summary": "Tracked lunar module temperature deviations",
+            "time": "2024-01-01T00:00:00+00:00",
+        }
+    )
+    store.append(
+        {
+            "type": "episode",
+            "tool": "python_runner",
+            "stdout": "alpha experiment",
+            "time": "2024-01-01T00:01:00+00:00",
+        }
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "search",
+            str(memory_path),
+            "lunar",
+            "--limit",
+            "1",
+            "--type",
+            "reflection",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert len(payload) == 1
+    assert payload[0]["type"] == "reflection"
