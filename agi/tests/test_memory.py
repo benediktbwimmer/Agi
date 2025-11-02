@@ -143,6 +143,53 @@ def test_semantic_search_prioritises_recent_relevant_records(memory_path: Path) 
     assert reflections_only[0]["type"] == "reflection"
 
 
+def test_semantic_search_boosts_keyword_matches(memory_path: Path) -> None:
+    store = MemoryStore(memory_path)
+    store.append(
+        {
+            "type": "episode",
+            "tool": "analysis",
+            "time": "2024-01-01T00:00:00+00:00",
+            "stdout": "General mission update",
+        }
+    )
+    store.append(
+        {
+            "type": "episode",
+            "tool": "spectrometer",
+            "time": "2024-01-01T01:00:00+00:00",
+            "stdout": "Oxygen yield rose sharply",
+            "keywords": ["oxygen", "yield"],
+        }
+    )
+
+    matches = store.semantic_search("oxygen yield", limit=1)
+
+    assert matches
+    assert matches[0]["tool"] == "spectrometer"
+    assert "semantic_score" in matches[0]
+    assert "lexical_hits" in matches[0]
+
+
+def test_semantic_search_exposes_vector_similarity(memory_path: Path) -> None:
+    pytest.importorskip("faiss")
+    store = MemoryStore(memory_path)
+    store.append(
+        {
+            "type": "reflection",
+            "summary": "Analysed quantum anomaly in gravitational lensing experiment.",
+            "time": "2024-01-01T00:00:00+00:00",
+        }
+    )
+
+    matches = store.semantic_search("quantum anomaly", limit=1)
+    assert matches
+    record = matches[0]
+    assert "semantic_score" in record
+    assert "vector_similarity" in record
+    assert record["vector_similarity"] >= 0.0
+
+
 def test_temporal_window_respects_anchor_and_filters(memory_path: Path) -> None:
     store = MemoryStore(memory_path)
     base = datetime(2024, 1, 1, tzinfo=timezone.utc)

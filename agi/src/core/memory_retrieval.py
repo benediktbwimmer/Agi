@@ -55,6 +55,21 @@ def _annotate_confidence(query: str, records: List[Dict[str, Any]]) -> Dict[str,
     return _summarise_confidence(confidences)
 
 
+def _summarise_similarity(records: Sequence[Mapping[str, Any]]) -> Dict[str, float]:
+    scores: List[float] = []
+    for record in records:
+        value = record.get("vector_similarity")
+        if isinstance(value, (int, float)):
+            scores.append(float(value))
+    if not scores:
+        return {}
+    return {
+        "max": round(max(scores), 4),
+        "mean": round(mean(scores), 4),
+        "count": len(scores),
+    }
+
+
 def _normalise_limit(value: Optional[int], default: int) -> int:
     if value is None:
         return default
@@ -118,6 +133,7 @@ class MemorySlice:
     coverage: Dict[str, int] = field(default_factory=dict)
     window: Dict[str, Optional[str]] | None = None
     confidence_summary: Dict[str, float] = field(default_factory=dict)
+    similarity_summary: Dict[str, float] = field(default_factory=dict)
 
     def to_payload(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -129,6 +145,8 @@ class MemorySlice:
             payload["window"] = dict(self.window)
         if self.confidence_summary:
             payload["confidence"] = dict(self.confidence_summary)
+        if self.similarity_summary:
+            payload["similarity"] = dict(self.similarity_summary)
         return payload
 
 
@@ -218,6 +236,7 @@ class MemoryRetriever:
 
         coverage = _compute_coverage(filtered)
         confidence_summary = _annotate_confidence(query, filtered)
+        similarity_summary = _summarise_similarity(filtered)
         window_meta: Dict[str, Optional[str]] | None = None
         if since or until:
             window_meta = {"since": since, "until": until}
@@ -227,6 +246,7 @@ class MemoryRetriever:
             coverage=coverage,
             window=window_meta,
             confidence_summary=confidence_summary,
+            similarity_summary=similarity_summary,
         )
 
     def timeline(
@@ -295,6 +315,10 @@ class MemoryRetriever:
         temporal_window = self.timeline(limit=recent_limit, types=types)
 
         payload: Dict[str, Any] = {"goal": goal}
+        insights_limit = limit_value or self.default_limit
+        insights = self.memory.query_reflection_insights(goal, limit=insights_limit)
+        if insights:
+            payload["insights"] = insights
         if semantic_slice and semantic_slice.matches:
             payload["semantic"] = semantic_slice.to_payload()
         if temporal_window.records:

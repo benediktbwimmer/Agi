@@ -40,6 +40,8 @@ def test_search_applies_tool_and_time_filters(memory_store: MemoryStore) -> None
     assert all(0.0 <= value <= 1.0 for value in confidences)
     assert slice_all.confidence_summary["count"] == 3
     assert slice_all.confidence_summary["nonzero_fraction"] > 0
+    if slice_all.similarity_summary:
+        assert slice_all.similarity_summary["count"] == len(slice_all.matches)
 
     filtered = retriever.search(
         "result",

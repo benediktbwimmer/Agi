@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Any, Iterable, Mapping, Sequence, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..core.world_model import WorldModel
 
 @dataclass(slots=True)
 class Gatekeeper:
@@ -21,6 +24,7 @@ class Gatekeeper:
     """
 
     policy: Mapping[str, object] = field(default_factory=dict)
+    world_model: "WorldModel | None" = None
 
     _TIER_ORDER = {"T0": 0, "T1": 1, "T2": 2, "T3": 3}
 
@@ -35,16 +39,55 @@ class Gatekeeper:
     def _tier_value(self, level: str) -> int:
         return self._TIER_ORDER[self._normalise_tier(level)]
 
+    def _evaluation_rules(self) -> Iterable[Mapping[str, Any]]:
+        rules = self.policy.get("evaluation_rules", [])
+        if isinstance(rules, Mapping):
+            rules = [rules]
+        if isinstance(rules, Sequence):
+            for rule in rules:
+                if isinstance(rule, Mapping):
+                    yield rule
+
+    def _apply_evaluation_bias(self, tier: str, tool: str | None) -> str:
+        if self.world_model is None:
+            return tier
+        current_value = self._tier_value(tier)
+        for rule in self._evaluation_rules():
+            claim = rule.get("claim")
+            if not claim:
+                continue
+            belief = self.world_model.beliefs.get(str(claim))
+            if belief is None:
+                continue
+            try:
+                min_credence = float(rule.get("min_credence", 0.6))
+            except (TypeError, ValueError):
+                min_credence = 0.6
+            if belief.credence >= min_credence:
+                continue
+            tools = rule.get("tools")
+            if tools:
+                if isinstance(tools, str):
+                    tools = [tools]
+                if tool not in {str(item) for item in tools if item is not None}:
+                    continue
+            allowed_tier = self._normalise_tier(rule.get("max_tier", "T0"))
+            allowed_value = self._tier_value(allowed_tier)
+            if allowed_value < current_value:
+                tier = allowed_tier
+                current_value = allowed_value
+        return tier
+
     def _max_allowed_for(self, tool: str | None) -> str:
         default_tier = self._normalise_tier(str(self.policy.get("max_tier", "T1")))
         if not tool:
-            return default_tier
+            return self._apply_evaluation_bias(default_tier, tool)
         tool_policies = self.policy.get("tools", {})
         if isinstance(tool_policies, Mapping):
             override = tool_policies.get(tool)
             if override is not None:
-                return self._normalise_tier(str(override))
-        return default_tier
+                return self._apply_evaluation_bias(self._normalise_tier(str(override)), tool)
+        return self._apply_evaluation_bias(default_tier, tool)
 
     def review(self, tier: str, *, tool: str | None = None) -> bool:
         requested = self._normalise_tier(tier)
