@@ -7,7 +7,7 @@ import pytest
 
 from agi.src.core.critic import Critic
 from agi.src.core.memory import MemoryStore
-from agi.src.core.orchestrator import Orchestrator
+from agi.src.core.orchestrator import Orchestrator, load_working_memory_snapshot
 from agi.src.core.planner import Planner
 from agi.src.core.types import ToolResult
 from agi.src.core.world_model import WorldModel
@@ -18,6 +18,10 @@ class StubTool:
         self.ok = ok
         self.safety = "T0"
         self.invocations: list[str] = []
+        self.modality = "analysis"
+        self.latency_ms = 42
+        self.trust = "medium"
+        self.description = "Stub analysis tool"
 
     async def run(self, args: Dict[str, Any], ctx: Any):  # pragma: no cover - exercised via orchestrator
         self.invocations.append(args.get("id", "call"))
@@ -95,6 +99,54 @@ def test_orchestrator_tracks_plan_results_independently(tmp_path):
 
     assert memory.query_by_tool("fail_tool")
     assert memory.query_by_tool("success_tool")
+    experiences = memory.recent(types=["experience_replay"])
+    assert experiences, "expected experience replay entry"
+    assert experiences[-1]["summary"]["success"] is False
+
+
+def test_orchestrator_writes_sensor_metadata(tmp_path):
+    planner_response = {
+        "plans": [
+            {
+                "id": "plan",
+                "claim_ids": ["claim"],
+                "steps": [
+                    {
+                        "id": "step",
+                        "tool": "instrument",
+                        "args": {},
+                        "safety_level": "T1",
+                    }
+                ],
+            }
+        ]
+    }
+
+    planner = Planner(llm=lambda payload: json.dumps(planner_response))
+    critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    world_model = WorldModel()
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools={"instrument": StubTool(ok=True)},
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+    )
+
+    asyncio.run(orchestrator.run({"goal": "demo"}, {}))
+
+    episodes = memory.query_by_tool("instrument")
+    assert episodes, "expected episode record"
+    record = episodes[0]
+    assert record.get("summary") == "pass"
+    assert record.get("tokens") == 1
+    assert record.get("keywords") == ["pass"]
+    assert record.get("sensor", {}).get("modality") == "analysis"
+    assert record.get("safety_tier") == "T0"
+    experiences = memory.recent(types=["experience_replay"])
+    assert experiences and experiences[-1]["summary"]["success"] is True
 
 
 def test_orchestrator_updates_all_claims(tmp_path):
@@ -218,6 +270,14 @@ def test_orchestrator_executes_hierarchical_plan(tmp_path):
 
     episodes = memory.query_by_tool("finisher")
     assert episodes and episodes[-1]["call_id"] == "success"
+    working_memory = orchestrator.working_memory
+    assert working_memory is not None
+    scratchpad = working_memory.scratchpad
+    assert scratchpad["attempts"]
+    branch_log = scratchpad["attempts"][0]["branch_log"]
+    assert any(entry["taken"] for entry in branch_log)
+    assert any(not entry["taken"] for entry in branch_log)
+    assert scratchpad["attempts"][0]["branch_log"][0]["metadata"]["next_steps"]
 
 
 def test_orchestrator_replans_with_critic_feedback(tmp_path):
@@ -305,12 +365,20 @@ def test_orchestrator_replans_with_critic_feedback(tmp_path):
         max_replans=3,
     )
 
-    report = asyncio.run(orchestrator.run({"goal": "safe"}, {}))
+    report = asyncio.run(orchestrator.run({"goal": "safe", "hypotheses": [{"id": "hyp-safe"}]}, {}))
 
     assert report.summary == "Completed run"
     assert len(planner_payloads) == 2
     assert planner_payloads[1]["feedback"][0]["plan_id"] == "plan-risky"
     assert planner_payloads[1]["feedback"][0]["status"] == "REVISION"
+    working_memory = orchestrator.working_memory
+    assert working_memory is not None
+    scratchpad = working_memory.scratchpad
+    attempt_entry = scratchpad["attempts"][0]
+    assert attempt_entry["hypotheses"][0]["id"] == "hyp-safe"
+    critique_entry = attempt_entry["critic_rationales"][0]
+    assert critique_entry["plan_id"] == "plan-risky"
+    assert "issues" in critique_entry
 
     critique_records = memory.query_by_tool("critic")
     assert critique_records and critique_records[-1]["status"] == "REVISION"
@@ -508,6 +576,19 @@ def test_orchestrator_populates_working_memory(tmp_path):
     assert snapshot["attempts"][0]["plans"][0]["rationale_tags"]
     assert snapshot.get("input_provenance", {}).get("goal") == "Assess options"
 
+    working_memory_file = next(tmp_path.glob("run_*/working_memory.json"))
+    working_snapshot = json.loads(working_memory_file.read_text())
+    assert working_snapshot["goal"] == "Assess options"
+    assert working_snapshot["attempts"][0]["status"] == "needs_replan"
+    assert any("rationale_tags" in plan for plan in working_snapshot["attempts"][0]["plans"])
+
+    assert any("working_memory" in path for path in report.artifacts)
+
+    rehydrated = load_working_memory_snapshot(working_memory_file)
+    assert rehydrated.run_id == working.run_id
+    assert rehydrated.attempts[0].plans[0].rationale_tags
+    assert rehydrated.to_dict() == working_snapshot
+
 
 def test_orchestrator_builds_memory_context_for_planner(tmp_path):
     captured: Dict[str, Any] = {}
@@ -547,6 +628,21 @@ def test_orchestrator_builds_memory_context_for_planner(tmp_path):
             "type": "reflection",
             "summary": "Analysed prior lunar habitat study",
             "time": "2024-01-01T00:00:00+00:00",
+            "keywords": ["lunar", "habitat"],
+        }
+    )
+    memory.append(
+        {
+            "type": "reflection_insight",
+            "goal": "Design lunar habitat",
+            "time": "2024-01-01T00:10:00+00:00",
+            "summary": "Prior run finished successfully",
+            "insights": {
+                "final_status": "complete",
+                "attempt_count": 1,
+                "critique_tags": ["safety"],
+                "risk_events": 1,
+            },
         }
     )
     memory.append(
@@ -555,6 +651,7 @@ def test_orchestrator_builds_memory_context_for_planner(tmp_path):
             "tool": "context_tool",
             "time": "2024-01-01T01:00:00+00:00",
             "stdout": "Evaluated habitat life support",
+            "keywords": ["life", "support"],
         }
     )
 
@@ -572,11 +669,37 @@ def test_orchestrator_builds_memory_context_for_planner(tmp_path):
     assert "payload" in captured
     memory_context = captured["payload"].get("memory_context")
     assert memory_context is not None
+    reflective_summary = captured["payload"].get("reflective_summary")
+    assert reflective_summary is not None
     assert memory_context.get("goal") == "Design lunar habitat"
     semantic = memory_context.get("semantic")
     recent = memory_context.get("recent")
+    insights = memory_context.get("insights")
     assert semantic or recent
     if semantic:
         assert semantic["coverage"]["reflection"] >= 1
+        matches = semantic.get("matches") or []
+        if matches:
+            first = matches[0]
+            if "keywords" in first:
+                assert isinstance(first["keywords"], list)
     if recent:
         assert any(record.get("tool") == "context_tool" for record in recent["records"])
+    assert insights
+    assert insights[-1]["insights"]["final_status"] == "complete"
+    assert "safety" in reflective_summary["dominant_tags"]
+    assert reflective_summary["caution_score"] >= 1
+    hypotheses = captured["payload"].get("hypotheses", [])
+    if hypotheses:
+        hypo_context = hypotheses[0].get("reflective_context")
+        assert hypo_context
+        assert "safety" in hypo_context["dominant_tags"]
+        assert hypo_context["caution_score"] >= 1
+    features = captured["payload"].get("memory_features")
+    assert features is not None
+    assert any(isinstance(keyword, str) for keyword in features.get("keywords", []))
+
+    summary_file = next(tmp_path.glob("run_*/reflection_summary.json"))
+    summary_data = json.loads(summary_file.read_text())
+    assert summary_data["sample_size"] >= 1
+    assert summary_data["goal"] == "Design lunar habitat"

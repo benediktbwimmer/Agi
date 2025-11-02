@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
 
@@ -10,6 +11,10 @@ from .critic import Critic
 from .manifest import RunManifest
 from .memory import MemoryStore
 from .memory_retrieval import MemoryRetriever
+from ..memory.encoders import summarise_tool_result
+from .memory_features import extract_memory_features
+from ..memory.experience import summarise_experience
+from ..memory.reflection_job import consolidate_reflections
 from .planner import Planner
 from .safety import (
     RiskAssessment,
@@ -17,7 +22,7 @@ from .safety import (
     assess_step_risk,
     enforce_plan_safety,
 )
-from .tools import describe_tool
+from .tools import ToolSpec, describe_tool
 from .telemetry import Telemetry
 from .types import BranchCondition, Plan, PlanStep, Report, RunContext, ToolResult
 from .world_model import WorldModel
@@ -52,6 +57,18 @@ def _summarise_memory_records(records: Iterable[Mapping[str, Any]], *, limit: in
             text = _truncate_text(record.get(key))
             if text:
                 entry[key] = text
+        keywords = record.get("keywords")
+        if isinstance(keywords, list) and keywords:
+            entry["keywords"] = [str(kw) for kw in keywords[:5] if kw]
+        sensor = record.get("sensor")
+        if isinstance(sensor, Mapping):
+            modality = sensor.get("modality")
+            trust = sensor.get("trust")
+            if modality or trust:
+                entry["sensor"] = {
+                    "modality": modality,
+                    "trust": trust,
+                }
         if entry:
             summary.append(entry)
     return summary
@@ -89,6 +106,10 @@ def _summarise_memory_context(context: Mapping[str, Any] | None) -> Dict[str, An
             if recent_summary:
                 summary["recent_records"] = recent_summary
     return summary or None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _build_input_provenance(
@@ -147,6 +168,37 @@ class PlanTrace:
             "rationale_tags": sorted(self.rationale_tags),
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "PlanTrace":
+        plan_id = str(payload.get("plan_id", ""))
+        raw_claims = payload.get("claim_ids", [])
+        claim_ids: List[str] = []
+        if isinstance(raw_claims, Iterable) and not isinstance(raw_claims, (str, bytes)):
+            claim_ids = [str(item) for item in raw_claims]
+        raw_step_count = payload.get("step_count")
+        try:
+            step_count = int(raw_step_count)
+        except (TypeError, ValueError):
+            step_count = 0
+        approved = payload.get("approved")
+        if approved is not None:
+            approved = bool(approved)
+        execution_succeeded = payload.get("execution_succeeded")
+        if execution_succeeded is not None:
+            execution_succeeded = bool(execution_succeeded)
+        raw_tags = payload.get("rationale_tags", [])
+        rationale_tags: Set[str] = set()
+        if isinstance(raw_tags, Iterable) and not isinstance(raw_tags, (str, bytes)):
+            rationale_tags = {str(tag) for tag in raw_tags if tag}
+        return cls(
+            plan_id=plan_id,
+            claim_ids=claim_ids,
+            step_count=step_count,
+            approved=approved,
+            execution_succeeded=execution_succeeded,
+            rationale_tags=rationale_tags,
+        )
+
 
 @dataclass
 class DeliberationAttempt:
@@ -158,6 +210,9 @@ class DeliberationAttempt:
     critiques: List[Dict[str, Any]] = field(default_factory=list)
     execution_feedback: List[Dict[str, Any]] = field(default_factory=list)
     risk_assessments: List[Dict[str, Any]] = field(default_factory=list)
+    hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    branch_log: List[Dict[str, Any]] = field(default_factory=list)
+    critic_rationales: List[Dict[str, Any]] = field(default_factory=list)
     _plan_index: Dict[str, PlanTrace] = field(default_factory=dict, init=False, repr=False)
 
     def register_plan(self, plan: Plan) -> PlanTrace:
@@ -170,12 +225,31 @@ class DeliberationAttempt:
         self._plan_index[plan.id] = trace
         return trace
 
+    def set_hypotheses(self, hypotheses: Iterable[Any]) -> None:
+        snapshot: List[Dict[str, Any]] = []
+        for item in hypotheses:
+            if isinstance(item, Mapping):
+                snapshot.append(json.loads(json.dumps(item)))
+            else:
+                snapshot.append({"value": json.loads(json.dumps(item)) if isinstance(item, (dict, list)) else str(item)})
+        self.hypotheses = snapshot
+
     def record_critique(self, plan_id: str, critique: Dict[str, Any]) -> None:
         self.critiques.append(dict(critique))
         plan = self._plan_index.get(plan_id)
         if plan is not None:
             plan.mark_rejected()
             plan.add_rationale_tags(critique.get("rationale_tags", []))
+        rationale = {
+            "plan_id": plan_id,
+            "status": critique.get("status"),
+            "summary": critique.get("summary"),
+            "issues": critique.get("issues"),
+            "rationale_tags": critique.get("rationale_tags"),
+        }
+        self.critic_rationales.append(
+            {k: json.loads(json.dumps(v)) if isinstance(v, Mapping) else v for k, v in rationale.items() if v}
+        )
 
     def record_execution_feedback(self, feedback: Iterable[Dict[str, Any]]) -> None:
         self.execution_feedback = [dict(item) for item in feedback]
@@ -192,6 +266,23 @@ class DeliberationAttempt:
     def record_risk_assessment(self, assessment: RiskAssessment) -> None:
         self.risk_assessments.append(assessment.as_dict())
 
+    def record_branch_decision(
+        self,
+        *,
+        plan_id: str,
+        step_id: str,
+        metadata: Mapping[str, Any] | None,
+        taken: bool,
+    ) -> None:
+        entry: Dict[str, Any] = {
+            "plan_id": plan_id,
+            "step_id": step_id,
+            "taken": taken,
+        }
+        if metadata:
+            entry["metadata"] = json.loads(json.dumps(metadata))
+        self.branch_log.append(entry)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "index": self.index,
@@ -200,7 +291,66 @@ class DeliberationAttempt:
             "critiques": [dict(item) for item in self.critiques],
             "execution_feedback": [dict(item) for item in self.execution_feedback],
             "risk_assessments": [dict(item) for item in self.risk_assessments],
+            "hypotheses": json.loads(json.dumps(self.hypotheses)),
+            "branch_log": [dict(item) for item in self.branch_log],
+            "critic_rationales": [dict(item) for item in self.critic_rationales],
         }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "DeliberationAttempt":
+        raw_plans = payload.get("plans", [])
+        plans: List[PlanTrace] = []
+        if isinstance(raw_plans, Iterable) and not isinstance(raw_plans, (str, bytes)):
+            for item in raw_plans:
+                if isinstance(item, Mapping):
+                    plans.append(PlanTrace.from_dict(item))
+        critiques = [
+            dict(item)
+            for item in payload.get("critiques", [])
+            if isinstance(item, Mapping)
+        ]
+        feedback = [
+            dict(item)
+            for item in payload.get("execution_feedback", [])
+            if isinstance(item, Mapping)
+        ]
+        risks = [
+            dict(item)
+            for item in payload.get("risk_assessments", [])
+            if isinstance(item, Mapping)
+        ]
+        try:
+            index = int(payload.get("index", 0))
+        except (TypeError, ValueError):
+            index = 0
+        status = str(payload.get("status", "planning"))
+        attempt = cls(
+            index=index,
+            status=status,
+            plans=plans,
+            critiques=critiques,
+            execution_feedback=feedback,
+            risk_assessments=risks,
+        )
+        for plan in plans:
+            attempt._plan_index[plan.plan_id] = plan
+        hyp_payload = payload.get("hypotheses", [])
+        if isinstance(hyp_payload, Iterable) and not isinstance(hyp_payload, (str, bytes)):
+            attempt.hypotheses = [
+                json.loads(json.dumps(item)) if isinstance(item, Mapping) else {"value": item}
+                for item in hyp_payload
+            ]
+        branch_payload = payload.get("branch_log", [])
+        if isinstance(branch_payload, Iterable) and not isinstance(branch_payload, (str, bytes)):
+            attempt.branch_log = [
+                dict(item) for item in branch_payload if isinstance(item, Mapping)
+            ]
+        rationale_payload = payload.get("critic_rationales", [])
+        if isinstance(rationale_payload, Iterable) and not isinstance(rationale_payload, (str, bytes)):
+            attempt.critic_rationales = [
+                dict(item) for item in rationale_payload if isinstance(item, Mapping)
+            ]
+        return attempt
 
 
 @dataclass
@@ -212,11 +362,29 @@ class WorkingMemory:
     hypotheses: List[Any]
     attempts: List[DeliberationAttempt] = field(default_factory=list)
     input_provenance: Dict[str, Any] | None = None
+    context_features: Dict[str, Any] | None = None
 
     def start_attempt(self, index: int) -> DeliberationAttempt:
         attempt = DeliberationAttempt(index=index)
         self.attempts.append(attempt)
         return attempt
+
+    @property
+    def scratchpad(self) -> Dict[str, Any]:
+        attempts_payload: List[Dict[str, Any]] = []
+        for attempt in self.attempts:
+            entry: Dict[str, Any] = {"index": attempt.index, "status": attempt.status}
+            if attempt.hypotheses:
+                entry["hypotheses"] = json.loads(json.dumps(attempt.hypotheses))
+            if attempt.branch_log:
+                entry["branch_log"] = [dict(item) for item in attempt.branch_log]
+            if attempt.critic_rationales:
+                entry["critic_rationales"] = [dict(item) for item in attempt.critic_rationales]
+            if len(entry) > 2:
+                attempts_payload.append(entry)
+        if attempts_payload:
+            return {"attempts": attempts_payload}
+        return {}
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -227,7 +395,43 @@ class WorkingMemory:
         }
         if self.input_provenance is not None:
             payload["input_provenance"] = json.loads(json.dumps(self.input_provenance))
+        if self.context_features is not None:
+            payload["context_features"] = json.loads(json.dumps(self.context_features))
+        scratchpad = self.scratchpad
+        if scratchpad:
+            payload["scratchpad"] = scratchpad
         return payload
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "WorkingMemory":
+        run_id = str(payload.get("run_id", ""))
+        goal_value = payload.get("goal")
+        goal = goal_value if goal_value is None else str(goal_value)
+        raw_hypotheses = payload.get("hypotheses", [])
+        hypotheses = (
+            list(raw_hypotheses)
+            if isinstance(raw_hypotheses, Iterable) and not isinstance(raw_hypotheses, (str, bytes))
+            else []
+        )
+        attempts_payload = payload.get("attempts", [])
+        attempts: List[DeliberationAttempt] = []
+        if isinstance(attempts_payload, Iterable) and not isinstance(attempts_payload, (str, bytes)):
+            for item in attempts_payload:
+                if isinstance(item, Mapping):
+                    attempts.append(DeliberationAttempt.from_dict(item))
+        instance = cls(
+            run_id=run_id,
+            goal=goal,
+            hypotheses=json.loads(json.dumps(hypotheses)),
+            attempts=attempts,
+        )
+        provenance = payload.get("input_provenance")
+        if isinstance(provenance, Mapping):
+            instance.input_provenance = json.loads(json.dumps(provenance))
+        features = payload.get("context_features")
+        if isinstance(features, Mapping):
+            instance.context_features = json.loads(json.dumps(features))
+        return instance
 
 
 @dataclass
@@ -245,6 +449,7 @@ class Orchestrator:
 
     _working_memory: WorkingMemory | None = field(init=False, default=None, repr=False)
     _input_provenance: Dict[str, Any] | None = field(init=False, default=None, repr=False)
+    _tool_specs: Dict[str, ToolSpec] = field(init=False, default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         if self.memory_retriever is None:
@@ -274,6 +479,34 @@ class Orchestrator:
         if step.description:
             step_payload["description"] = step.description
         payload["step"] = step_payload
+        references: Dict[str, Any] = {}
+        inputs = payload.get("inputs") or {}
+        hypothesis_refs = []
+        for item in inputs.get("hypotheses", []) or []:
+            if isinstance(item, Mapping):
+                ident = item.get("id") or item.get("claim_id")
+                if ident:
+                    hypothesis_refs.append(str(ident))
+        if hypothesis_refs:
+            references["hypotheses"] = hypothesis_refs
+        memory_inputs = inputs.get("memory") or {}
+        memory_refs: List[str] = []
+        for key in ("semantic_matches", "recent_records"):
+            for record in memory_inputs.get(key, []) or []:
+                if isinstance(record, Mapping):
+                    ident = record.get("id") or record.get("call_id")
+                    if ident:
+                        memory_refs.append(str(ident))
+        if memory_refs:
+            unique_refs = []
+            seen: Set[str] = set()
+            for ref in memory_refs:
+                if ref not in seen:
+                    seen.add(ref)
+                    unique_refs.append(ref)
+            references["memory_records"] = unique_refs
+        if references:
+            payload["references"] = references
         return payload
 
     async def run(self, goal_spec: Dict[str, Any], constraints: Dict[str, Any] | None = None) -> Report:
@@ -287,6 +520,7 @@ class Orchestrator:
             describe_tool(tool, override_name=name)
             for name, tool in sorted(self.tools.items(), key=lambda item: item[0])
         ]
+        self._tool_specs = {spec.name: spec for spec in tool_catalog}
 
         raw_hypotheses = goal_spec.get("hypotheses", [])
         if raw_hypotheses is None:
@@ -325,11 +559,17 @@ class Orchestrator:
                 recent_records = context.get("recent", {}).get("records", []) if context.get("recent") else []
                 if semantic_matches or recent_records:
                     memory_context_payload = context
+                    features = extract_memory_features(memory_context_payload)
+                    if features:
+                        memory_context_payload.setdefault("features", features)
+                        if self._working_memory is not None:
+                            self._working_memory.context_features = json.loads(json.dumps(features))
                     self._emit(
                         "orchestrator.memory_context_ready",
                         run_id=run_id,
                         semantic_matches=len(semantic_matches),
                         recent_records=len(recent_records),
+                        features=features or None,
                     )
 
         self._input_provenance = _build_input_provenance(
@@ -352,6 +592,13 @@ class Orchestrator:
 
         for attempt in range(self.max_replans + 1):
             working_attempt = self._working_memory.start_attempt(attempt)
+            working_attempt.set_hypotheses(hypotheses)
+            self._emit(
+                "orchestrator.working_memory.hypotheses",
+                run_id=run_id,
+                attempt=attempt,
+                count=len(hypotheses),
+            )
             plans = await self.planner.plan_from(
                 hypotheses,
                 feedback=feedback,
@@ -375,6 +622,13 @@ class Orchestrator:
                 critique_record = _normalise_critique(plan.id, critique)
                 critiques.append(critique_record)
                 working_attempt.record_critique(plan.id, critique_record)
+                self._emit(
+                    "orchestrator.working_memory.critique",
+                    run_id=run_id,
+                    attempt=attempt,
+                    plan_id=plan.id,
+                    tags=critique_record.get("rationale_tags"),
+                )
                 memory_entries.append(
                     _critique_memory_record(
                         critique_record,
@@ -512,14 +766,71 @@ class Orchestrator:
         manifest.write(run_dir / "manifest.json")
         RunManifest.write_schema(run_dir / "manifest.schema.json")
 
+        consolidate = goal_spec.get("goal")
+        reflection_summary = consolidate_reflections(
+            self.memory,
+            goal=consolidate,
+            write_back=True,
+            world_model=self.world_model,
+            limit=100,
+        )
+        summary_path: Path | None = None
+        if reflection_summary.get("sample_size"):
+            summary_path = run_dir / "reflection_summary.json"
+            summary_path.write_text(json.dumps(reflection_summary, indent=2), encoding="utf-8")
+            self._emit(
+                "orchestrator.reflection_consolidated",
+                run_id=run_id,
+                summary=reflection_summary,
+            )
+
+        working_memory_snapshot = None
+        working_memory_path = run_dir / "working_memory.json"
+        if self._working_memory is not None:
+            working_memory_snapshot = self._working_memory.to_dict()
+            working_memory_path.write_text(
+                json.dumps(working_memory_snapshot, indent=2),
+                encoding="utf-8",
+            )
+            self._emit(
+                "orchestrator.working_memory_persisted",
+                run_id=run_id,
+                path=_safe_relpath(working_memory_path),
+            )
+
         success = all(result.ok for result in tool_results) if tool_results else True
+        artifacts = [_safe_relpath(run_dir)]
+        if summary_path is not None:
+            artifacts.append(_safe_relpath(summary_path))
+        if working_memory_snapshot is not None:
+            artifacts.append(_safe_relpath(working_memory_path))
         report = Report(
             goal=goal_spec.get("goal", ""),
             summary="Completed run",
             key_findings=[result.stdout or "" for result in tool_results],
             belief_deltas=updates,
-            artifacts=[_safe_relpath(run_dir)],
+            artifacts=artifacts,
         )
+        try:
+            experience_chunk = summarise_experience(
+                report,
+                manifest,
+                working_memory=self._working_memory,
+            )
+            experience_entry = {
+                "type": "experience_replay",
+                "time": manifest.created_at or goal_spec.get("time") or _now_iso(),
+                "goal": experience_chunk.get("goal"),
+                "summary": experience_chunk,
+            }
+            self.memory.append(experience_entry)
+            self._emit(
+                "orchestrator.experience_recorded",
+                run_id=run_id,
+                goal=experience_entry.get("goal"),
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
         self._emit(
             "orchestrator.run_completed",
             run_id=run_id,
@@ -711,6 +1022,7 @@ async def _execute_plan_step(
             record_provenance=True,
         )
         provenance_payload = orchestrator._tool_event_provenance(plan, step)
+        references_payload = provenance_payload.get("references")
         orchestrator._emit(
             "orchestrator.tool_started",
             run_id=run_id,
@@ -718,12 +1030,27 @@ async def _execute_plan_step(
             step_id=step.id,
             tool=step.tool,
             provenance=provenance_payload,
+            references=references_payload,
         )
         result = await tool.run({**step.args, "id": step.id}, ctx)
         per_plan_results.append(result)
         all_results.append(result)
         result_index[step.id] = result
         result_index[result.call_id] = result
+        sensor_metadata: Dict[str, Any] | None = None
+        safety_tier: str | None = None
+        tool_spec = orchestrator._tool_specs.get(step.tool) if step.tool else None
+        if tool_spec is not None:
+            safety_tier = tool_spec.safety_tier
+            profile = tool_spec.sensor_profile
+            if profile is not None:
+                sensor_metadata = {
+                    "modality": profile.modality,
+                    "latency_ms": profile.latency_ms,
+                    "trust": profile.trust,
+                    "description": profile.description,
+                }
+
         orchestrator._emit(
             "orchestrator.tool_completed",
             run_id=run_id,
@@ -733,19 +1060,43 @@ async def _execute_plan_step(
             ok=result.ok,
             wall_time_ms=result.wall_time_ms,
             provenance=provenance_payload,
+            sensor=sensor_metadata,
+            safety_tier=safety_tier,
+            references=references_payload,
         )
-        memory_entries.append(
-            {
-                "type": "episode",
-                "plan_id": plan.id,
-                "tool": step.tool,
-                "call_id": result.call_id,
-                "ok": result.ok,
-                "stdout": result.stdout,
-                "time": goal_spec.get("time", "1970-01-01T00:00:00+00:00"),
-                "provenance": [asdict(src) for src in result.provenance],
-            }
-        )
+        output_summary = summarise_tool_result(result)
+        episode_entry: Dict[str, Any] = {
+            "type": "episode",
+            "plan_id": plan.id,
+            "tool": step.tool,
+            "call_id": result.call_id,
+            "ok": result.ok,
+            "stdout": result.stdout,
+            "time": goal_spec.get("time", "1970-01-01T00:00:00+00:00"),
+            "provenance": [asdict(src) for src in result.provenance],
+            "summary": output_summary.get("summary"),
+            "tokens": output_summary.get("tokens"),
+            "latency_ms": result.wall_time_ms,
+            "sensor": sensor_metadata,
+            "safety_tier": safety_tier,
+            "keywords": output_summary.get("keywords"),
+            "structured": output_summary.get("structured"),
+            "claims": output_summary.get("claims"),
+            "embedding": output_summary.get("embedding"),
+        }
+        if episode_entry["summary"] is None:
+            episode_entry.pop("summary")
+        if episode_entry["tokens"] is None:
+            episode_entry.pop("tokens")
+        if not episode_entry.get("keywords"):
+            episode_entry.pop("keywords", None)
+        if not episode_entry.get("structured"):
+            episode_entry.pop("structured", None)
+        if not episode_entry.get("claims"):
+            episode_entry.pop("claims", None)
+        if not episode_entry.get("embedding"):
+            episode_entry.pop("embedding", None)
+        memory_entries.append(episode_entry)
 
     if step.sub_steps:
         await _execute_plan_steps(
@@ -764,8 +1115,30 @@ async def _execute_plan_step(
             working_attempt=working_attempt,
         )
 
-    for branch in step.branches:
-        if _should_execute_branch(branch.condition, result_index):
+    for branch_index, branch in enumerate(step.branches):
+        condition_payload = branch.condition.to_payload()
+        branch_metadata = {
+            "index": branch_index,
+            "condition": condition_payload,
+            "next_steps": [child.id for child in branch.steps],
+        }
+        branch_taken = _should_execute_branch(branch.condition, result_index)
+        working_attempt.record_branch_decision(
+            plan_id=plan.id,
+            step_id=step.id,
+            metadata=branch_metadata,
+            taken=branch_taken,
+        )
+        orchestrator._emit(
+            "orchestrator.working_memory.branch",
+            run_id=run_id,
+            plan_id=plan.id,
+            step_id=step.id,
+            branch_index=branch_index,
+            taken=branch_taken,
+            condition=condition_payload,
+        )
+        if branch_taken:
             await _execute_plan_steps(
                 orchestrator=orchestrator,
                 plan=plan,
@@ -853,3 +1226,13 @@ def _safe_relpath(path: Path) -> str:
         return str(path.relative_to(Path.cwd()))
     except ValueError:
         return str(path)
+
+
+def load_working_memory_snapshot(path: Path | str) -> WorkingMemory:
+    """Load a persisted working memory snapshot from disk."""
+
+    snapshot_path = Path(path)
+    data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    if not isinstance(data, Mapping):
+        raise ValueError("working memory snapshot must be a JSON object")
+    return WorkingMemory.from_dict(data)

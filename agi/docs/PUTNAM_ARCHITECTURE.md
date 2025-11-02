@@ -48,6 +48,16 @@ records in memory and updating the world model.
   slices now annotate each match with a lexical confidence score along with
   aggregate statistics surfaced to planners and telemetry. This allows the
   orchestrator to weight contextual evidence during hypothesis formation.
+* **Provenance-aware telemetry (`agi/src/core/orchestrator.py`)** – Tool events now
+  include explicit references to the hypotheses and memory records that triggered
+  execution, while episodic entries record sensor metadata and summarised outputs
+  to tighten the perception-to-abstraction loop.
+* **Context feature extraction (`agi/src/core/planner.py`)** – Planner payloads aggregate
+  keywords, sensor modalities, and safety tiers from contextual memory so the workspace
+  can prioritise evidence-rich signals when selecting plans.
+* **Faiss vector memory (`agi/src/core/vector_index.py`)** – Memory entries are embedded
+  into a Faiss-backed index, with similarity scores surfaced alongside lexical confidence
+  so the workspace can rank perceptual evidence using both symbolic and geometric cues.
 
 ## 3. Cognitive Workspace Layer
 
@@ -68,6 +78,25 @@ workspace.
    active hypotheses and deliberation history across replans.
 2. Capture critic feedback with rationale tags so subsequent planning rounds can
    weight hypotheses by justification strength.
+
+### Recent Progress
+
+* **Working memory persistence (`agi/src/core/orchestrator.py`)** – Each run now
+  writes a JSON snapshot of the deliberation workspace alongside the manifest,
+  emits telemetry when the snapshot is recorded, and includes loader utilities
+  plus summarisation helpers (`agi/src/core/reflection.py`) for reflective
+  analyses. Insights are persisted into episodic memory via the executive
+  (`agi/src/core/executive.py`) and surfaced through the evaluation harness
+  (`agi/src/evals/harness.py`) so downstream runs and scorecards can leverage the
+  Putnam-style workspace for continual learning.
+* **Reflection consolidation (`agi/src/memory/reflection_job.py`)** – A scheduled
+  job aggregates `reflection_insight` records, writes summaries back to memory,
+  and nudges the world model with safety-weighted belief updates so persistent
+  caution signals bias future planning.
+* **Reflective planning bias (`agi/src/core/planner.py`)** – Planner prompts now
+  include aggregated insight summaries and per-hypothesis reflective context,
+  allowing deliberation tags (e.g., safety critiques) to influence plan selection
+  heuristics directly.
 
 ## 4. Decision and Action Layer
 
@@ -106,6 +135,9 @@ how those artefacts drive learning.
   into memory entries for future runs.
 * **Evals Harness (`agi/src/evals/harness.py`)** – Supplies structured tasks that
   measure capability growth over time.
+* **Experience replay (`agi/src/memory/experience.py`)** – Condenses manifests and
+  working-memory traces into reusable knowledge chunks appended to memory for
+  subsequent planning cycles.
 
 ### Engineering Implications
 

@@ -112,3 +112,102 @@ def test_planner_requires_plan():
     planner = Planner(llm=EmptyLLM())
     with pytest.raises(PlannerError):
         asyncio.run(planner.plan_from([]))
+
+
+def test_planner_prefers_low_risk_plans_with_reflection():
+    class ReflectiveLLM:
+        def __init__(self) -> None:
+            self.payload = None
+
+        def __call__(self, payload):
+            self.payload = payload
+            return json.dumps(
+                {
+                    "plans": [
+                        {
+                            "id": "plan-high-risk",
+                            "claim_ids": ["claim-1"],
+                            "steps": [
+                                {
+                                    "id": "hazard",
+                                    "tool": "hazardous_tool",
+                                    "args": {},
+                                    "safety_level": "T3",
+                                }
+                            ],
+                            "expected_cost": {},
+                            "risks": ["collision"],
+                            "ablations": [],
+                        },
+                        {
+                            "id": "plan-safe",
+                            "claim_ids": ["claim-1"],
+                            "steps": [
+                                {
+                                    "id": "safe",
+                                    "tool": "safe_tool",
+                                    "args": {},
+                                    "safety_level": "T0",
+                                }
+                            ],
+                            "expected_cost": {},
+                            "risks": [],
+                            "ablations": [],
+                        },
+                    ]
+                }
+            )
+
+    llm = ReflectiveLLM()
+    memory_context = {
+        "goal": "hazard mitigation",
+        "semantic": {
+            "matches": [
+                {
+                    "summary": "Mitigation report",
+                    "keywords": ["hazard", "mitigation"],
+                    "sensor": {"modality": "analysis"},
+                    "safety_tier": "T1",
+                }
+            ]
+        },
+        "insights": [
+            {
+                "run_id": "prior-1",
+                "time": "2024-01-01T00:00:00+00:00",
+                "summary": "Risky approach failed",
+                "insights": {
+                    "final_status": "needs_replan",
+                    "critique_tags": ["safety"],
+                    "risk_events": 3,
+                    "attempt_count": 2,
+                    "hypotheses": [{"id": "hyp"}],
+                    "failure_motifs": {
+                        "issues": {"latency": 2},
+                        "failure_branches": [
+                            {"plan_id": "plan-high-risk", "step_id": "hazard", "count": 1}
+                        ],
+                    },
+                },
+            }
+        ],
+    }
+    planner = Planner(llm=llm)
+    plans = asyncio.run(planner.plan_from([{"id": "hyp"}], memory_context=memory_context))
+
+    assert plans[0].id == "plan-safe"
+    assert llm.payload is not None
+    summary = llm.payload.get("reflective_summary")
+    assert summary is not None
+    assert summary["caution_score"] >= 2
+    assert summary["risk_events"] == 3
+    assert all(step.safety_level != "T3" for plan in plans for step in plan.iter_tool_calls())
+    features = llm.payload.get("memory_features")
+    assert features is not None
+    assert "hazard" in features.get("keywords", [])
+    planner_bias = llm.payload.get("planner_bias")
+    assert planner_bias is not None
+    assert "latency" in planner_bias.get("avoid_issues", [])
+    hypothesis_context = llm.payload["hypotheses"][0]["reflective_context"]
+    assert hypothesis_context["focus_count"] >= 1
+    assert "analysis" in features.get("modalities", [])

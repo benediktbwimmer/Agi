@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional
 
 from .memory import MemoryStore
 from .orchestrator import Orchestrator
+from .reflection import summarise_working_memory
 from .retrieval import MemoryRetriever
 from .types import Belief, Report
 from .world_model import WorldModel
@@ -204,5 +205,21 @@ class ExecutiveAgent:
             "belief_deltas": [asdict(delta) for delta in report.belief_deltas],
             "artifacts": list(report.artifacts),
         }
+        working_memory = getattr(self.orchestrator, "working_memory", None)
+        insights = summarise_working_memory(working_memory)
+        if insights:
+            reflection["insights"] = insights
         self.memory.append(reflection)
-
+        if insights:
+            insight_entry = {
+                "type": "reflection_insight",
+                "time": reflection["time"],
+                "goal": reflection["goal"],
+                "tool": "executive_reflection",
+                "run_id": insights.get("run_id"),
+                "summary": reflection["summary"],
+                "insights": insights,
+            }
+            if reflection.get("claim_ids"):
+                insight_entry["claim_ids"] = list(reflection["claim_ids"])
+            self.memory.append(insight_entry)

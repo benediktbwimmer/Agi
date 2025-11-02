@@ -207,3 +207,57 @@ def test_orchestrator_records_real_time_risk_assessment(tmp_path: Path) -> None:
     assert working is not None
     assert working.attempts[0].risk_assessments
     assert working.attempts[0].risk_assessments[0]["approved"] is False
+
+
+def test_gatekeeper_respects_evaluation_bias(tmp_path: Path) -> None:
+    planner = StaticPlanner([_plan(step_tier="T1")])
+    world_model = _world_model()
+    world_model.update(
+        [
+            {
+                "claim_id": "evaluation::dummy",
+                "passed": False,
+                "weight": 2.0,
+                "provenance": [],
+            }
+        ]
+    )
+    gatekeeper = Gatekeeper(
+        policy={
+            "evaluation_rules": [
+                {
+                    "claim": "evaluation::dummy",
+                    "max_tier": "T0",
+                    "min_credence": 0.6,
+                    "tools": ["dummy"],
+                }
+            ]
+        },
+        world_model=world_model,
+    )
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=_critic(),
+        tools={"dummy": DummyTool()},
+        memory=_memory(tmp_path),
+        world_model=world_model,
+        gatekeeper=gatekeeper,
+        working_dir=tmp_path,
+    )
+
+    with pytest.raises(PermissionError):
+        asyncio.run(orchestrator.run({"goal": "test", "hypotheses": [{"id": "h1"}]}))
+
+    world_model.update(
+        [
+            {
+                "claim_id": "evaluation::dummy",
+                "passed": True,
+                "weight": 4.0,
+                "provenance": [],
+            }
+        ]
+    )
+
+    report = asyncio.run(orchestrator.run({"goal": "test", "hypotheses": [{"id": "h1"}]}))
+    assert report.summary == "Completed run"

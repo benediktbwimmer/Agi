@@ -54,6 +54,21 @@ def _build_orchestrator(
     critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
     telemetry = Telemetry(sinks=[sink])
     memory = MemoryStore(tmp_path / "memory.jsonl", telemetry=telemetry)
+    memory.append(
+        {
+            "type": "reflection_insight",
+            "goal": "demo",
+            "time": "2024-01-01T00:00:00+00:00",
+             "id": "reflection-1",
+            "summary": "baseline",
+            "insights": {
+                "final_status": "needs_replan",
+                "critique_tags": ["safety"],
+                "risk_events": 1,
+                "attempt_count": 1,
+            },
+        }
+    )
     world_model = WorldModel()
     orchestrator = Orchestrator(
         planner=planner,
@@ -72,7 +87,12 @@ def test_orchestrator_emits_structured_events(tmp_path: Path) -> None:
     sink = InMemorySink()
     orchestrator = _build_orchestrator(tmp_path, sink)
 
-    asyncio.run(orchestrator.run({"goal": "demo"}, {}))
+    asyncio.run(
+        orchestrator.run(
+            {"goal": "demo", "hypotheses": [{"id": "hyp-1"}], "memory_context_limit": 3},
+            {},
+        )
+    )
 
     events = sink.events
     event_types = [event["event"] for event in events]
@@ -80,12 +100,17 @@ def test_orchestrator_emits_structured_events(tmp_path: Path) -> None:
     assert "orchestrator.tool_started" in event_types
     assert "orchestrator.tool_completed" in event_types
     assert "orchestrator.input_provenance_ready" in event_types
+    assert "orchestrator.working_memory_persisted" in event_types
+    assert "orchestrator.reflection_consolidated" in event_types
     assert "memory.append" in event_types
     assert events[-1]["event"] == "orchestrator.run_completed"
 
     tool_started = next(event for event in events if event["event"] == "orchestrator.tool_started")
     assert "provenance" in tool_started
     assert tool_started["provenance"]["plan"]["id"]
+    assert tool_started.get("references", {}).get("hypotheses") == ["hyp-1"]
+    memory_refs = tool_started.get("references", {}).get("memory_records")
+    assert memory_refs == ["reflection-1"]
 
 
 def test_orchestrator_emits_risk_events(tmp_path: Path) -> None:

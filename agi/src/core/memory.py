@@ -10,7 +10,16 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+
+try:  # pragma: no cover - optional dependency
+    import numpy as np
+except ImportError:  # pragma: no cover - numpy not installed
+    np = None  # type: ignore[assignment]
+try:  # pragma: no cover - optional dependency
+    from .vector_index import MemoryVectorIndex
+except ImportError:  # pragma: no cover - faiss or numpy not installed
+    MemoryVectorIndex = None  # type: ignore[assignment]
 
 from .telemetry import Telemetry
 
@@ -77,6 +86,34 @@ def _extract_text(record: Mapping[str, Any], *, max_depth: int = 3) -> str:
     return " ".join(parts)
 
 
+def _embedding_to_vector(embedding: Mapping[str, Any]) -> Optional[Any]:
+    if np is None:
+        return None
+    try:
+        dim = int(embedding.get("dim", 0))
+    except (TypeError, ValueError):
+        return None
+    if dim <= 0 or dim > 4096:
+        return None
+    values = embedding.get("values")
+    if not isinstance(values, Mapping):
+        return None
+    vector = np.zeros(dim, dtype=np.float32)
+    nonzero = False
+    for key, weight in values.items():
+        try:
+            index = int(key)
+            value = float(weight)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < dim and value != 0.0:
+            vector[index] = value
+            nonzero = True
+    if not nonzero:
+        return None
+    return vector
+
+
 @dataclass
 class MemoryStore:
     path: Path
@@ -90,10 +127,18 @@ class MemoryStore:
     _tool_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
     _source_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
     _token_index: Dict[str, List[int]] = field(default_factory=dict, init=False)
+    _keyword_index: Dict[str, List[int]] = field(default_factory=dict, init=False)
     _plan_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
+    _goal_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict, init=False)
+    _vector_index: "MemoryVectorIndex | None" = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if MemoryVectorIndex is not None:
+            try:
+                self._vector_index = MemoryVectorIndex()
+            except RuntimeError:  # pragma: no cover - faiss initialisation failure
+                self._vector_index = None
         if self.path.exists():
             with self.path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -142,6 +187,54 @@ class MemoryStore:
 
     def query_by_plan(self, plan_id: str) -> List[Dict[str, Any]]:
         return [json.loads(json.dumps(r)) for r in self._plan_index.get(plan_id, [])]
+
+    def query_reflection_insights(self, goal: str, *, limit: int = 3) -> List[Dict[str, Any]]:
+        if limit <= 0:
+            return []
+        key = goal.strip().lower()
+        if not key:
+            return []
+        records = self._goal_index.get(key, [])
+        if not records:
+            return []
+        selected = [record for record in records if record.get("type") == "reflection_insight"][-limit:]
+        return [json.loads(json.dumps(record)) for record in selected]
+
+    def iter_reflection_insights(
+        self,
+        *,
+        goal: str | None = None,
+        limit: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        """Return reflection insight records ordered by timestamp."""
+
+        records: List[Dict[str, Any]] = []
+        if goal is not None:
+            key = goal.strip().lower()
+            if key:
+                bucket = self._goal_index.get(key, [])
+                for record in bucket:
+                    if record.get("type") == "reflection_insight":
+                        records.append(record)
+        else:
+            seen: set[int] = set()
+            for bucket in self._goal_index.values():
+                for record in bucket:
+                    if record.get("type") != "reflection_insight":
+                        continue
+                    record_id = id(record)
+                    if record_id in seen:
+                        continue
+                    seen.add(record_id)
+                    records.append(record)
+
+        def _key(item: Mapping[str, Any]) -> str:
+            return str(item.get("time") or "")
+
+        records.sort(key=_key)
+        if limit is not None and limit > 0:
+            records = records[-limit:]
+        return [json.loads(json.dumps(record)) for record in records]
 
     def temporal_window(
         self,
@@ -222,30 +315,62 @@ class MemoryStore:
             return []
 
         tokens = _tokenise(query)
-        if not tokens:
-            return []
-
         type_filter = {t for t in types} if types is not None else None
-        scores: Counter[int] = Counter()
+        lexical_scores: Counter[int] = Counter()
         for token in tokens:
             for record_idx in self._token_index.get(token, []):
                 if type_filter is not None:
                     record_type = self._records[record_idx].get("type")
                     if record_type not in type_filter:
                         continue
-                scores[record_idx] += 1
+                lexical_scores[record_idx] += 1
+                if record_idx in self._keyword_index.get(token, []):
+                    lexical_scores[record_idx] += 2
 
-        if not scores:
+        vector_scores: Dict[int, float] = {}
+        vector_weight = 0.75
+        if self._vector_index is not None:
+            vector_weight = getattr(self._vector_index, "search_weight", vector_weight)
+            try:
+                vector_results = self._vector_index.search_text(query, limit=max(limit * 3, limit))
+            except RuntimeError:  # pragma: no cover - faiss failure
+                vector_results = []
+                self._vector_index = None
+            else:
+                for record_idx, similarity in vector_results:
+                    record = self._records[record_idx]
+                    if type_filter is not None and record.get("type") not in type_filter:
+                        continue
+                    # retain the strongest similarity per record
+                    if similarity > vector_scores.get(record_idx, 0.0):
+                        vector_scores[record_idx] = similarity
+
+        combined_scores: Dict[int, float] = {idx: float(score) for idx, score in lexical_scores.items()}
+        for idx, similarity in vector_scores.items():
+            combined_scores[idx] = combined_scores.get(idx, 0.0) + similarity * vector_weight
+
+        if not combined_scores:
             return []
 
-        def _sort_key(index: int) -> tuple[int, float, int]:
+        def _sort_key(index: int) -> Tuple[float, float, int]:
             timestamp = self._record_times[index]
             ts_key = timestamp.timestamp() if timestamp is not None else float("-inf")
-            return (-scores[index], -ts_key, -index)
+            return (-combined_scores[index], -ts_key, -index)
 
-        ranked_indices = sorted(scores, key=_sort_key)
+        ranked_indices = sorted(combined_scores, key=_sort_key)
         limited = ranked_indices[:limit]
-        return [json.loads(json.dumps(self._records[idx])) for idx in limited]
+        results: List[Dict[str, Any]] = []
+        for idx in limited:
+            record = json.loads(json.dumps(self._records[idx]))
+            record["semantic_score"] = round(combined_scores[idx], 4)
+            lexical_hits = lexical_scores.get(idx)
+            if lexical_hits:
+                record["lexical_hits"] = int(lexical_hits)
+            vector_similarity = vector_scores.get(idx)
+            if vector_similarity:
+                record["vector_similarity"] = round(vector_similarity, 4)
+            results.append(record)
+        return results
 
     def search(
         self,
@@ -314,10 +439,7 @@ class MemoryStore:
             return results
 
         tokens = _tokenise(query)
-        if not tokens:
-            return []
-
-        scores: Counter[int] = Counter()
+        lexical_scores: Counter[int] = Counter()
         for token in tokens:
             for record_idx in self._token_index.get(token, []):
                 record = self._records[record_idx]
@@ -325,19 +447,55 @@ class MemoryStore:
                     continue
                 if not _time_filter(record_idx):
                     continue
-                scores[record_idx] += 1
+                lexical_scores[record_idx] += 1
+                if record_idx in self._keyword_index.get(token, []):
+                    lexical_scores[record_idx] += 2
 
-        if not scores:
+        vector_scores: Dict[int, float] = {}
+        vector_weight = 0.75
+        if self._vector_index is not None:
+            vector_weight = getattr(self._vector_index, "search_weight", vector_weight)
+            try:
+                vector_results = self._vector_index.search_text(query, limit=max(limit * 3, limit))
+            except RuntimeError:  # pragma: no cover - faiss failure
+                vector_results = []
+                self._vector_index = None
+            else:
+                for record_idx, similarity in vector_results:
+                    record = self._records[record_idx]
+                    if not _type_filter(record):
+                        continue
+                    if not _time_filter(record_idx):
+                        continue
+                    if similarity > vector_scores.get(record_idx, 0.0):
+                        vector_scores[record_idx] = similarity
+
+        combined_scores: Dict[int, float] = {idx: float(score) for idx, score in lexical_scores.items()}
+        for idx, similarity in vector_scores.items():
+            combined_scores[idx] = combined_scores.get(idx, 0.0) + similarity * vector_weight
+
+        if not combined_scores:
             return []
 
-        def _sort_key(index: int) -> tuple[int, float, int]:
+        def _sort_key(index: int) -> Tuple[float, float, int]:
             timestamp = self._record_times[index]
             ts_key = timestamp.timestamp() if timestamp is not None else float("-inf")
-            return (-scores[index], -ts_key, -index)
+            return (-combined_scores[index], -ts_key, -index)
 
-        ranked_indices = sorted(scores, key=_sort_key)
+        ranked_indices = sorted(combined_scores, key=_sort_key)
         limited = ranked_indices[:limit]
-        return [json.loads(json.dumps(self._records[idx])) for idx in limited]
+        results: List[Dict[str, Any]] = []
+        for idx in limited:
+            record = json.loads(json.dumps(self._records[idx]))
+            record["semantic_score"] = round(combined_scores[idx], 4)
+            lexical_hits = lexical_scores.get(idx)
+            if lexical_hits:
+                record["lexical_hits"] = int(lexical_hits)
+            vector_similarity = vector_scores.get(idx)
+            if vector_similarity:
+                record["vector_similarity"] = round(vector_similarity, 4)
+            results.append(record)
+        return results
 
     def _index_record(self, record: Dict[str, Any]) -> None:
         stored_record = json.loads(json.dumps(record))
@@ -389,8 +547,39 @@ class MemoryStore:
                     self._source_index.setdefault(digest, []).append(stored_record)
 
         text_blob = _extract_text(stored_record)
+        vector_added = False
+        if self._vector_index is not None:
+            embedding_payload = stored_record.get("embedding")
+            if isinstance(embedding_payload, Mapping):
+                vector = _embedding_to_vector(embedding_payload)
+                if vector is not None:
+                    try:
+                        self._vector_index.add_vector(vector, record_index)
+                    except RuntimeError:  # pragma: no cover - faiss operational failure
+                        self._vector_index = None
+                    else:
+                        vector_added = True
+        if self._vector_index is not None and text_blob and not vector_added:
+            try:
+                self._vector_index.add_text(text_blob, record_index)
+            except RuntimeError:  # pragma: no cover - faiss operational failure
+                self._vector_index = None
         for token in set(_tokenise(text_blob)):
             self._token_index.setdefault(token, []).append(record_index)
+        keywords = stored_record.get("keywords")
+        if isinstance(keywords, list):
+            for keyword in keywords:
+                if not isinstance(keyword, str):
+                    continue
+                token = keyword.strip().lower()
+                if token:
+                    self._keyword_index.setdefault(token, []).append(record_index)
+
+        goal = stored_record.get("goal")
+        if isinstance(goal, str) and goal.strip():
+            key = goal.strip().lower()
+            bucket = self._goal_index.setdefault(key, [])
+            bucket.append(stored_record)
 
 
 __all__ = [
