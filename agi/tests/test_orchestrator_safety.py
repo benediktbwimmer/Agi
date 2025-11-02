@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agi.src.core.critic import Critic
-from agi.src.core.memory import MemoryStore, WorkingMemory
+from agi.src.core.memory import MemoryStore
 from agi.src.core.orchestrator import Orchestrator
 from agi.src.core.planner import Planner
 from agi.src.core.types import Plan, ToolCall, ToolResult, RunContext
@@ -20,7 +20,7 @@ class StaticPlanner(Planner):
         super().__init__(llm=lambda payload: json.dumps({}))
         self._plans = plans
 
-    async def plan_from(self, hypotheses):  # type: ignore[override]
+    async def plan_from(self, hypotheses, *, feedback=None, memory_context=None):  # type: ignore[override]
         return list(self._plans)
 
 
@@ -32,16 +32,40 @@ class DummyTool:
         return ToolResult(call_id=args.get("id", "dummy"), ok=True, stdout="done")
 
 
+class AdaptivePlanner(Planner):
+    def __init__(self) -> None:
+        super().__init__(llm=lambda payload: json.dumps({}))
+        self._attempts = 0
+
+    async def plan_from(self, hypotheses, *, feedback=None, memory_context=None):  # type: ignore[override]
+        self._attempts += 1
+        return [_plan(step_tier="T0")]
+
+
+class RuntimeGatekeeper(Gatekeeper):
+    def __init__(self) -> None:
+        super().__init__(policy={})
+        self._runtime_block_pending = True
+        self._invocation_count = 0
+
+    def review(self, tier: str, *, tool: str | None = None) -> bool:
+        self._invocation_count += 1
+        if (
+            tool == "dummy"
+            and self._runtime_block_pending
+            and self._invocation_count >= 2
+        ):
+            self._runtime_block_pending = False
+            return False
+        return super().review(tier, tool=tool)
+
+
 def _critic() -> Critic:
     return Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
 
 
 def _memory(tmp_path: Path) -> MemoryStore:
     return MemoryStore(tmp_path / "memory.jsonl")
-
-
-def _working_memory() -> WorkingMemory:
-    return WorkingMemory()
 
 
 def _world_model() -> WorldModel:
@@ -66,14 +90,43 @@ def _plan(step_tier: str) -> Plan:
     )
 
 
+def _branch_plan() -> Plan:
+    return Plan(
+        id="plan-branch",
+        claim_ids=["claim-branch"],
+        steps=[
+            {
+                "id": "root",
+                "tool": "dummy",
+                "args": {"id": "root"},
+                "branches": [
+                    {
+                        "condition": "on_success(root)",
+                        "steps": [
+                            {
+                                "id": "danger",
+                                "tool": "dummy",
+                                "args": {"id": "danger"},
+                                "safety_level": "T3",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        expected_cost={},
+        risks=[],
+        ablations=[],
+    )
+
+
 def test_orchestrator_denies_disallowed_tier(tmp_path: Path) -> None:
     planner = StaticPlanner([_plan(step_tier="T2")])
     orchestrator = Orchestrator(
         planner=planner,
         critic=_critic(),
         tools={"dummy": DummyTool()},
-        episodic_memory=_memory(tmp_path),
-        working_memory=_working_memory(),
+        memory=_memory(tmp_path),
         world_model=_world_model(),
         gatekeeper=Gatekeeper(policy={}),
         working_dir=tmp_path,
@@ -89,8 +142,7 @@ def test_orchestrator_records_safety_audit(tmp_path: Path) -> None:
         planner=planner,
         critic=_critic(),
         tools={"dummy": DummyTool()},
-        episodic_memory=_memory(tmp_path),
-        working_memory=_working_memory(),
+        memory=_memory(tmp_path),
         world_model=_world_model(),
         gatekeeper=Gatekeeper(policy={}),
         working_dir=tmp_path,
@@ -105,3 +157,107 @@ def test_orchestrator_records_safety_audit(tmp_path: Path) -> None:
     audit = manifest.get("safety_audit")
     assert audit and audit[0]["approved"] is True
     assert audit[0]["effective_level"] == "T1"
+    risks = manifest.get("risk_assessments")
+    assert risks and risks[0]["approved"] is True
+    assert risks[0]["effective_level"] == "T1"
+
+
+def test_orchestrator_checks_branch_tiers(tmp_path: Path) -> None:
+    planner = StaticPlanner([_branch_plan()])
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=_critic(),
+        tools={"dummy": DummyTool()},
+        memory=_memory(tmp_path),
+        world_model=_world_model(),
+        gatekeeper=Gatekeeper(policy={}),
+        working_dir=tmp_path,
+    )
+
+    with pytest.raises(PermissionError):
+        asyncio.run(orchestrator.run({"goal": "test", "hypotheses": [{"id": "h1"}]}))
+
+
+def test_orchestrator_records_real_time_risk_assessment(tmp_path: Path) -> None:
+    planner = AdaptivePlanner()
+    gatekeeper = RuntimeGatekeeper()
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=_critic(),
+        tools={"dummy": DummyTool()},
+        memory=_memory(tmp_path),
+        world_model=_world_model(),
+        gatekeeper=gatekeeper,
+        working_dir=tmp_path,
+    )
+
+    report = asyncio.run(
+        orchestrator.run({"goal": "test", "hypotheses": [{"id": "h1"}]})
+    )
+    assert report.summary == "Completed run"
+
+    manifests = list(tmp_path.glob("run_*/manifest.json"))
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    risks = manifest.get("risk_assessments", [])
+    assert len(risks) >= 2
+    assert risks[0]["approved"] is False
+    assert any(entry["approved"] for entry in risks)
+
+    working = orchestrator.working_memory
+    assert working is not None
+    assert working.attempts[0].risk_assessments
+    assert working.attempts[0].risk_assessments[0]["approved"] is False
+
+
+def test_gatekeeper_respects_evaluation_bias(tmp_path: Path) -> None:
+    planner = StaticPlanner([_plan(step_tier="T1")])
+    world_model = _world_model()
+    world_model.update(
+        [
+            {
+                "claim_id": "evaluation::dummy",
+                "passed": False,
+                "weight": 2.0,
+                "provenance": [],
+            }
+        ]
+    )
+    gatekeeper = Gatekeeper(
+        policy={
+            "evaluation_rules": [
+                {
+                    "claim": "evaluation::dummy",
+                    "max_tier": "T0",
+                    "min_credence": 0.6,
+                    "tools": ["dummy"],
+                }
+            ]
+        },
+        world_model=world_model,
+    )
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=_critic(),
+        tools={"dummy": DummyTool()},
+        memory=_memory(tmp_path),
+        world_model=world_model,
+        gatekeeper=gatekeeper,
+        working_dir=tmp_path,
+    )
+
+    with pytest.raises(PermissionError):
+        asyncio.run(orchestrator.run({"goal": "test", "hypotheses": [{"id": "h1"}]}))
+
+    world_model.update(
+        [
+            {
+                "claim_id": "evaluation::dummy",
+                "passed": True,
+                "weight": 4.0,
+                "provenance": [],
+            }
+        ]
+    )
+
+    report = asyncio.run(orchestrator.run({"goal": "test", "hypotheses": [{"id": "h1"}]}))
+    assert report.summary == "Completed run"

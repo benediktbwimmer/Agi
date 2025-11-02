@@ -4,6 +4,7 @@ import ast
 import operator
 from typing import Any, Dict
 
+from . import SensorProfile, ToolCapability, ToolParameter, ToolSpec
 from ..types import RunContext, ToolResult
 
 
@@ -27,6 +28,48 @@ class Calculator:
             raise ValueError("'expression' must be provided")
         value = _eval_expr(ast.parse(expr, mode="eval").body)
         return ToolResult(call_id=args.get("id", "calculator"), ok=True, stdout=str(value), provenance=[])
+
+    def describe(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description="Evaluate arithmetic expressions using a safe AST interpreter.",
+            safety_tier=self.safety,
+            sensor_profile=SensorProfile(
+                modality="symbolic",
+                latency_ms=20,
+                trust="high",
+                description="Deterministic arithmetic evaluation",
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string", "description": "Arithmetic expression to evaluate."}
+                },
+                "required": ["expression"],
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "stdout": {"type": "string", "description": "String representation of the numeric result."}
+                },
+            },
+            capabilities=(
+                ToolCapability(
+                    name="evaluate",
+                    description="Evaluate infix arithmetic expressions with +, -, *, /, and exponentiation.",
+                    safety_tier=self.safety,
+                    parameters=(
+                        ToolParameter(
+                            name="expression",
+                            description="Mathematical expression composed of literals and basic operators.",
+                            required=True,
+                            schema={"type": "string"},
+                        ),
+                    ),
+                    outputs=("stdout",),
+                ),
+            ),
+        )
 
 
 def _eval_expr(node: ast.AST) -> Any:

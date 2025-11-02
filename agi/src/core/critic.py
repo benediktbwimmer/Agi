@@ -19,6 +19,8 @@ class Critic:
             data = json.loads(response)
         except json.JSONDecodeError as exc:  # pragma: no cover - defensive
             raise CriticError("Critic did not return JSON") from exc
-        if data.get("status") not in {"PASS", "FAIL"}:
+        status = str(data.get("status", "")).upper()
+        if status not in {"PASS", "FAIL", "REVISION"}:
             raise CriticError("Critic response missing status")
+        data["status"] = status
         return data

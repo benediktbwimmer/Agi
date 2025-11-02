@@ -9,8 +9,9 @@ import textwrap
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
+from . import SensorProfile, ToolCapability, ToolParameter, ToolSpec
 from ..types import RunContext, Source, ToolResult
 
 
@@ -101,6 +102,68 @@ class PythonRunner:
             wall_time_ms=duration_ms,
             provenance=provenance,
             data={"artifacts_dir": _safe_relpath(artifacts_dir)},
+        )
+
+    def describe(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description="Execute sandboxed Python code with filesystem isolation and no network access.",
+            safety_tier=self.safety,
+            metadata={"artifacts_root": str(self._artifacts_root)},
+            sensor_profile=SensorProfile(
+                modality="code_execution",
+                latency_ms=250,
+                trust="medium",
+                description="Runs Python snippets inside a hermetic sandbox",
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python source code to execute."},
+                    "stdin": {
+                        "type": "string",
+                        "description": "Optional standard input passed to the process.",
+                    },
+                },
+                "required": ["code"],
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "stdout": {"type": "string"},
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "artifacts_dir": {
+                                "type": "string",
+                                "description": "Relative path to the captured sandbox artifacts.",
+                            }
+                        },
+                    },
+                },
+            },
+            capabilities=(
+                ToolCapability(
+                    name="execute_python",
+                    description="Run Python code in a hermetic sandbox with deterministic IO policies.",
+                    safety_tier=self.safety,
+                    parameters=(
+                        ToolParameter(
+                            name="code",
+                            description="Python source code to execute inside the sandbox.",
+                            required=True,
+                            schema={"type": "string"},
+                        ),
+                        ToolParameter(
+                            name="stdin",
+                            description="Optional stdin passed as UTF-8 text.",
+                            required=False,
+                            schema={"type": "string"},
+                        ),
+                    ),
+                    outputs=("stdout", "data.artifacts_dir"),
+                ),
+            ),
         )
 
 

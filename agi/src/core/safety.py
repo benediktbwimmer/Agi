@@ -9,10 +9,10 @@ configured safety policy before any side effects occur.
 """
 
 from dataclasses import asdict, dataclass
-from typing import Dict, Iterable, Mapping
+from typing import Dict, Iterable, Mapping, Optional
 
 from ..governance.gatekeeper import Gatekeeper
-from .types import Plan, ToolCall
+from .types import Plan, PlanStep, ToolCall
 
 
 _TIER_ORDER = {
@@ -56,7 +56,24 @@ class SafetyDecision:
         return asdict(self)
 
 
-def _resolve_tool(tools: Mapping[str, object], call: ToolCall) -> object:
+@dataclass(frozen=True)
+class RiskAssessment:
+    """Real-time risk check performed immediately before tool execution."""
+
+    plan_id: str
+    step_id: str
+    tool_name: str
+    requested_level: str
+    tool_level: str
+    effective_level: str
+    approved: bool
+    reason: str | None = None
+
+    def as_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+def _resolve_tool(tools: Mapping[str, object], call: ToolCall | PlanStep) -> object:
     tool = tools.get(call.tool)
     if tool is None:
         raise KeyError(f"Unknown tool {call.tool}")
@@ -92,12 +109,12 @@ def enforce_plan_safety(
     denied: list[SafetyDecision] = []
 
     for plan in plans:
-        for step in plan.steps:
+        for step in plan.iter_tool_calls():
             tool = _resolve_tool(tools, step)
             tool_level = getattr(tool, "safety", "T0")
             requested_level = step.safety_level or tool_level
             effective = _max_tier(requested_level, tool_level)
-            approved = gatekeeper.review(effective)
+            approved = gatekeeper.review(effective, tool=step.tool)
             decision = SafetyDecision(
                 plan_id=plan.id,
                 step_id=step.id,
@@ -120,4 +137,30 @@ def enforce_plan_safety(
         raise PermissionError(f"Safety gatekeeper denied execution for: {summary}")
 
     return decisions
+
+
+def assess_step_risk(
+    plan: Plan,
+    step: PlanStep,
+    tools: Mapping[str, object],
+    gatekeeper: Gatekeeper,
+) -> RiskAssessment:
+    """Perform a real-time risk assessment for the given plan step."""
+
+    tool = _resolve_tool(tools, step)
+    tool_level = getattr(tool, "safety", "T0")
+    requested_level = step.safety_level or tool_level
+    effective = _max_tier(requested_level, tool_level)
+    approved = gatekeeper.review(effective, tool=step.tool)
+    reason: Optional[str] = None if approved else f"Gatekeeper denied tier {effective}"
+    return RiskAssessment(
+        plan_id=plan.id,
+        step_id=step.id,
+        tool_name=step.tool or "",
+        requested_level=_normalise_tier(requested_level),
+        tool_level=_normalise_tier(tool_level),
+        effective_level=_normalise_tier(effective),
+        approved=approved,
+        reason=reason,
+    )
 

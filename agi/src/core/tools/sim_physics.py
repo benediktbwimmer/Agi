@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict
 
+from . import SensorProfile, ToolCapability, ToolParameter, ToolSpec
 from ..types import RunContext, ToolResult
 
 
@@ -42,4 +42,75 @@ class PhysicsSimulator:
             stdout=str(trajectory[-1] if trajectory else {}),
             data={"trajectory": trajectory},
             provenance=[],
+        )
+
+    def describe(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description="Simulate projectile motion in a simple physics model.",
+            safety_tier=self.safety,
+            sensor_profile=SensorProfile(
+                modality="simulation",
+                latency_ms=80,
+                trust="medium",
+                description="Numerical physics integrator for simple projectile motion",
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "angle_deg": {"type": "number", "description": "Launch angle in degrees."},
+                    "speed": {"type": "number", "description": "Initial speed in metres per second."},
+                    "gravity": {"type": "number", "description": "Gravity constant used in m/s^2."},
+                    "steps": {"type": "integer", "minimum": 1, "description": "Integration steps."},
+                },
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "trajectory": {
+                                "type": "array",
+                                "items": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}},
+                            }
+                        },
+                    },
+                    "stdout": {"type": "string"},
+                },
+            },
+            capabilities=(
+                ToolCapability(
+                    name="simulate_projectile",
+                    description="Generate a trajectory for a projectile launched under uniform gravity.",
+                    safety_tier=self.safety,
+                    parameters=(
+                        ToolParameter(
+                            name="angle_deg",
+                            description="Launch angle measured in degrees.",
+                            required=False,
+                            schema={"type": "number"},
+                        ),
+                        ToolParameter(
+                            name="speed",
+                            description="Initial launch speed in m/s.",
+                            required=False,
+                            schema={"type": "number"},
+                        ),
+                        ToolParameter(
+                            name="gravity",
+                            description="Gravity constant applied to the simulation.",
+                            required=False,
+                            schema={"type": "number"},
+                        ),
+                        ToolParameter(
+                            name="steps",
+                            description="Number of integration steps to compute the trajectory.",
+                            required=False,
+                            schema={"type": "integer", "minimum": 1},
+                        ),
+                    ),
+                    outputs=("data.trajectory",),
+                ),
+            ),
         )
