@@ -89,6 +89,43 @@ export AGI_ENABLE_MEMORY=0
 
 Re-enable memory (the default) with `AGI_ENABLE_MEMORY=1`.
 
+## Memory subsystem
+
+AGI can operate with an optional working/episodic memory stack. The
+orchestrator hydrates working memory before each tool call and persists
+significant episodes for future recall when the feature is enabled. Refer to the
+[memory guide](docs/memory.md) for a detailed walkthrough of the execution
+lifecycle, runtime toggles, and targeted tests that validate the behaviour.
+
+## Keeping the branch in sync
+
+The project’s `work` branch is expected to stay rebased on top of `main`.
+Consult the [merge guide](docs/merging.md) for a step-by-step checklist that
+covers stashing local edits, fetching the latest upstream history, resolving
+conflicts, and verifying that the merge guard tests pass.
+
+## CLI Utilities
+
+After installing the project (or when working from the repository), you can use the bundled Typer CLI:
+
+```bash
+agi-cli --help
+```
+
+Useful commands:
+
+- `agi-cli manifest validate path/to/manifest.json` – validate orchestrator manifests against the Pydantic schema.
+- `agi-cli manifest schema path/to/schema.json` – write the JSON schema describing the manifest structure.
+- `agi-cli manifest summary path/to/manifest.json --sample 5` – emit a condensed JSON summary of run outcomes and safety events.
+- `agi-cli tools catalog path/to/manifest.json --tier T1` – list tool capabilities and sensor profiles captured in a manifest.
+- `agi-cli memory recent path/to/memory.jsonl --limit 10` – show the latest episodic memory entries (filter by `--type` as needed).
+- `agi-cli memory search path/to/memory.jsonl "lunar habitat"` – run a lexical semantic search across memory records.
+- `agi-cli memory reflect path/to/memory.jsonl --goal goal-name --write-back` – aggregate reflection insights, optionally persisting a summary.
+- `agi-cli memory timeline path/to/memory.jsonl --limit 20 --type reflection` – view a chronological slice with coverage metadata.
+- `agi-cli memory replay path/to/manifest.json --working path/to/working_memory.json` – generate an experience replay chunk combining manifest and working-memory insights.
+- `agi-cli working summarize path/to/working_memory.json` – summarise deliberation attempts captured in working-memory snapshots.
+- `agi-cli run inspect path/to/run_dir --memory path/to/memory.jsonl` – inspect a run directory with manifest, working memory, and optional contextual memory snippets.
+
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the multi-phase roadmap guiding future
