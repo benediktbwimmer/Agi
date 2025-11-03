@@ -3,6 +3,7 @@ from __future__ import annotations
 """Developer-facing CLI utilities for the Putnam-inspired AGI stack."""
 
 import json
+from dataclasses import asdict
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -16,6 +17,7 @@ from agi.src.core.memory_retrieval import MemoryRetriever as StructuredMemoryRet
 from agi.src.core.orchestrator import WorkingMemory
 from agi.src.core.reflection import summarise_working_memory
 from agi.src.core.types import Report
+from agi.src.core.world_model import WorldModel
 from agi.src.memory.experience import summarise_experience
 from agi.src.memory.reflection_job import consolidate_reflections
 
@@ -26,11 +28,13 @@ memory_app = typer.Typer(help="Inspect episodic memory logs.")
 working_app = typer.Typer(help="Summarise working-memory deliberation snapshots.")
 tools_app = typer.Typer(help="List tool catalog metadata and sensor profiles.")
 run_app = typer.Typer(help="Inspect orchestrator run directories.")
+world_app = typer.Typer(help="Inspect world-model beliefs.")
 app.add_typer(manifest_app, name="manifest")
 app.add_typer(memory_app, name="memory")
 app.add_typer(working_app, name="working")
 app.add_typer(tools_app, name="tools")
 app.add_typer(run_app, name="run")
+app.add_typer(world_app, name="world")
 
 
 def _load_manifest(path: Path) -> RunManifest:
@@ -191,6 +195,70 @@ def _summarise_tool_spec(spec: Any) -> Dict[str, Any]:
         "capabilities": capabilities,
         "metadata": getattr(spec, "metadata", {}),
     }
+
+
+@world_app.command("beliefs")
+def world_beliefs(
+    path: Path = typer.Argument(
+        ...,
+        exists=True,
+        resolve_path=True,
+        help="Path to the persisted world model state (e.g. beliefs.json).",
+    ),
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        "-n",
+        help="Maximum number of beliefs to display; use 0 to show all.",
+    ),
+    detail: bool = typer.Option(
+        False,
+        "--detail",
+        help="Include recent evidence supporting each belief.",
+    ),
+    evidence_limit: int = typer.Option(
+        5,
+        "--evidence-limit",
+        help="Number of evidence entries to include per belief when --detail is set; 0 shows all.",
+    ),
+) -> None:
+    """Inspect beliefs recorded in the world model."""
+
+    try:
+        model = WorldModel(storage_path=path)
+    except Exception as exc:  # pragma: no cover - defensive
+        typer.secho(f"Failed to load world model: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+    beliefs = list(model.beliefs.values())
+    beliefs.sort(key=lambda belief: belief.credence, reverse=True)
+    if limit > 0:
+        beliefs = beliefs[:limit]
+    payload: List[Dict[str, Any]] = []
+    for belief in beliefs:
+        entry: Dict[str, Any] = {
+            "claim_id": belief.claim_id,
+            "credence": round(belief.credence, 4),
+            "uncertainty": round(belief.uncertainty, 4),
+            "support": round(belief.support, 4),
+            "conflict": round(belief.conflict, 4),
+            "variance": round(belief.variance, 6),
+            "confidence_interval": [round(value, 4) for value in belief.confidence_interval],
+            "last_updated": belief.last_updated,
+        }
+        if detail:
+            if evidence_limit > 0:
+                evidence_items = belief.evidence[-evidence_limit:]
+            else:
+                evidence_items = belief.evidence
+            entry["evidence"] = [
+                {
+                    **asdict(evidence),
+                    "source": asdict(evidence.source),
+                }
+                for evidence in evidence_items
+            ]
+        payload.append(entry)
+    typer.echo(json.dumps(payload, indent=2, ensure_ascii=True))
 
 
 @manifest_app.command("validate")

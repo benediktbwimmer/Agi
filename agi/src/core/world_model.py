@@ -5,9 +5,9 @@ import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-from .types import Belief, Source
+from .types import Belief, Evidence, Source
 
 
 @dataclass
@@ -32,39 +32,69 @@ class WorldModel:
         update_time = datetime.now(timezone.utc)
         update_time_iso = update_time.isoformat()
         for result in results:
-            claim_id = result["claim_id"]
-            if result.get("observed_unit") and result.get("expected_unit"):
-                if result["observed_unit"] != result["expected_unit"]:
-                    raise ValueError("Unit mismatch for claim %s" % claim_id)
+            claim_id = str(result["claim_id"])
+            expected_unit = result.get("expected_unit")
+            observed_unit = result.get("observed_unit") or expected_unit
+            if expected_unit and observed_unit and observed_unit != expected_unit:
+                raise ValueError("Unit mismatch for claim %s" % claim_id)
             passed = _coerce_bool(result.get("passed"))
+            confidence_value = _normalise_confidence(result.get("confidence"))
+            weight = _resolve_weight(
+                result.get("weight"),
+                confidence=confidence_value,
+            )
+            raw_weight = _normalise_raw_weight(result.get("weight"))
             prior = self._beliefs.get(
                 claim_id,
                 Belief(
                     claim_id=claim_id,
                     credence=0.5,
-                    evidence=[],
                     last_updated=update_time_iso,
+                    evidence=[],
                     support=0.0,
                     conflict=0.0,
+                    variance=1.0,
                 ),
             )
-            weight = _resolve_weight(
-                result.get("weight"),
-                confidence=result.get("confidence"),
-            )
             posterior = _logistic_update(prior.credence, passed, weight=weight)
-            evidence = list(prior.evidence)
-            provenance = result.get("provenance") or []
-            for source in provenance:
-                if isinstance(source, Source):
-                    evidence.append(source)
-                elif isinstance(source, dict):
-                    evidence.append(Source(**source))
             timestamp = _resolve_update_timestamp(
                 result.get("timestamp"), default=update_time_iso
             )
-            support = prior.support + (weight if passed else 0.0)
-            conflict = prior.conflict + (weight if not passed else 0.0)
+            provided_evidence = _normalise_evidence_list(
+                result.get("evidence"),
+                default_outcome="support" if passed else "conflict",
+                default_weight=weight,
+                default_confidence=confidence_value,
+                default_unit=observed_unit,
+                default_note=_normalise_note(result),
+                timestamp=timestamp,
+            )
+            if provided_evidence:
+                evidence_entries = provided_evidence
+            else:
+                provenance = _normalise_sources(result.get("provenance"))
+                evidence_entries = _build_evidence_entries(
+                    provenance,
+                    outcome="support" if passed else "conflict",
+                    weight=weight,
+                    raw_weight=raw_weight,
+                    confidence=confidence_value,
+                    unit=observed_unit,
+                    value=_normalise_value(result.get("observed_value", result.get("value"))),
+                    note=_normalise_note(result),
+                    timestamp=timestamp,
+                )
+            evidence = list(prior.evidence)
+            evidence.extend(evidence_entries)
+            support = prior.support
+            conflict = prior.conflict
+            for entry in evidence_entries:
+                if entry.is_support():
+                    support += entry.weight
+                else:
+                    conflict += entry.weight
+            total_weight = support + conflict
+            variance = 1.0 if total_weight <= 0 else 1.0 / (1.0 + total_weight)
             belief = Belief(
                 claim_id=claim_id,
                 credence=posterior,
@@ -72,6 +102,7 @@ class WorldModel:
                 last_updated=timestamp,
                 support=support,
                 conflict=conflict,
+                variance=variance,
             )
             self._beliefs[claim_id] = belief
             updated.append(belief)
@@ -94,17 +125,21 @@ class WorldModel:
             data = json.load(fh)
         beliefs = {}
         for item in data.get("beliefs", []):
+            last_updated = item.get("last_updated", datetime.now(timezone.utc).isoformat())
+            evidence_payload = item.get("evidence", [])
             evidence = [
-                src if isinstance(src, Source) else Source(**src)
-                for src in item.get("evidence", [])
+                _deserialize_evidence(payload, default_time=last_updated)
+                for payload in evidence_payload
             ]
+            evidence = [entry for entry in evidence if entry is not None]
             belief = Belief(
                 claim_id=item["claim_id"],
                 credence=float(item.get("credence", 0.5)),
                 evidence=evidence,
-                last_updated=item.get("last_updated", datetime.now(timezone.utc).isoformat()),
+                last_updated=last_updated,
                 support=float(item.get("support", 0.0)),
                 conflict=float(item.get("conflict", 0.0)),
+                variance=float(item.get("variance", 1.0)),
             )
             beliefs[belief.claim_id] = belief
         self._beliefs = beliefs
@@ -114,7 +149,7 @@ class WorldModel:
         if self.storage_path is None:
             return
         payload = {
-            "version": 1,
+            "version": 2,
             "revision": self._revision,
             "updated_at": timestamp,
             "beliefs": [self._serialize_belief(b) for b in self._beliefs.values()],
@@ -146,9 +181,10 @@ class WorldModel:
             "claim_id": belief.claim_id,
             "credence": belief.credence,
             "last_updated": belief.last_updated,
-            "evidence": [asdict(src) for src in belief.evidence],
+            "evidence": [asdict(entry) for entry in belief.evidence],
             "support": belief.support,
             "conflict": belief.conflict,
+            "variance": belief.variance,
         }
 
 
@@ -174,18 +210,14 @@ def _coerce_bool(value: Any) -> bool:
     raise ValueError("passed must be a boolean or boolean-like value")
 
 
-def _resolve_weight(weight: Any, *, confidence: Any | None) -> float:
+def _resolve_weight(weight: Any, *, confidence: Optional[float]) -> float:
     base = 1.5 if weight is None else float(weight)
     if math.isnan(base):  # pragma: no cover - defensive
         raise ValueError("weight cannot be NaN")
     if base < 0:
         raise ValueError("weight must be non-negative")
     if confidence is not None:
-        conf = float(confidence)
-        if math.isnan(conf):  # pragma: no cover - defensive
-            raise ValueError("confidence cannot be NaN")
-        conf = max(0.0, min(1.0, conf))
-        base *= conf
+        base *= confidence
     return base
 
 
@@ -208,3 +240,221 @@ def _resolve_update_timestamp(
             parsed = parsed.replace(tzinfo=tz)
         return parsed.isoformat()
     raise TypeError("timestamp must be a string or datetime")
+
+
+def _normalise_sources(payload: Any) -> List[Source]:
+    sources: List[Source] = []
+    if payload is None:
+        return sources
+    if isinstance(payload, Source):
+        return [payload]
+    if isinstance(payload, Mapping):
+        try:
+            return [Source(**{k: payload[k] for k in ("kind", "ref", "note") if k in payload})]
+        except TypeError:
+            return [Source(kind=str(payload.get("kind", "unknown")), ref=str(payload.get("ref", "")), note=payload.get("note"))]
+    if isinstance(payload, Iterable) and not isinstance(payload, (str, bytes)):
+        for item in payload:
+            if isinstance(item, Source):
+                sources.append(item)
+            elif isinstance(item, Mapping):
+                kind = str(item.get("kind", "unknown"))
+                ref = str(item.get("ref", ""))
+                note = item.get("note")
+                sources.append(Source(kind=kind, ref=ref, note=note))
+    return sources
+
+
+def _build_evidence_entries(
+    sources: List[Source],
+    *,
+    outcome: str,
+    weight: float,
+    raw_weight: Optional[float],
+    confidence: Optional[float],
+    unit: Optional[str],
+    value: Any,
+    note: Optional[str],
+    timestamp: str,
+) -> List[Evidence]:
+    outcome_normalised = outcome.lower()
+    if outcome_normalised not in {"support", "conflict"}:
+        outcome_normalised = "support"
+    effective_sources = sources or [
+        Source(kind="system", ref="world_model", note="auto-generated")
+    ]
+    count = len(effective_sources)
+    per_weight = weight / count if count and weight else weight
+    per_raw = raw_weight / count if raw_weight is not None and count else raw_weight
+    entries: List[Evidence] = []
+    for source in effective_sources:
+        entries.append(
+            Evidence(
+                source=source,
+                outcome=outcome_normalised,
+                weight=per_weight,
+                raw_weight=per_raw,
+                confidence=confidence,
+                unit=unit,
+                value=value,
+                note=note,
+                observed_at=timestamp,
+            )
+        )
+    return entries
+
+
+def _normalise_confidence(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("confidence must be numeric") from exc
+    if math.isnan(confidence):  # pragma: no cover - defensive
+        raise ValueError("confidence cannot be NaN")
+    return max(0.0, min(1.0, confidence))
+
+
+def _normalise_raw_weight(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        raw = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("weight must be numeric") from exc
+    if math.isnan(raw):  # pragma: no cover - defensive
+        raise ValueError("weight cannot be NaN")
+    if raw < 0:
+        raise ValueError("weight must be non-negative")
+    return raw
+
+
+def _normalise_value(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    try:
+        return json.loads(json.dumps(value))
+    except TypeError:
+        return str(value)
+
+
+def _normalise_note(result: Mapping[str, Any]) -> Optional[str]:
+    for key in ("note", "summary", "comment"):
+        value = result.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(number):  # pragma: no cover - defensive
+        return default
+    return number
+
+
+def _deserialize_evidence(payload: Any, *, default_time: str) -> Optional[Evidence]:
+    if isinstance(payload, Evidence):
+        return payload
+    if isinstance(payload, Source):
+        return Evidence(
+            source=payload,
+            outcome="support",
+            weight=0.0,
+            raw_weight=None,
+            confidence=None,
+            unit=None,
+            value=None,
+            note=None,
+            observed_at=default_time,
+        )
+    if isinstance(payload, Mapping):
+        if "source" in payload:
+            source = payload["source"]
+            if not isinstance(source, Source):
+                source = Source(
+                    kind=str(source.get("kind", "unknown")),
+                    ref=str(source.get("ref", "")),
+                    note=source.get("note"),
+                )
+            outcome = str(payload.get("outcome", "support"))
+            weight = _to_float(payload.get("weight"), 0.0)
+            raw_weight = payload.get("raw_weight")
+            raw_weight = None if raw_weight is None else _to_float(raw_weight, 0.0)
+            confidence = _normalise_confidence(payload.get("confidence"))
+            unit = payload.get("unit")
+            value = payload.get("value")
+            note = payload.get("note")
+            observed_at = payload.get("observed_at", default_time)
+            return Evidence(
+                source=source,
+                outcome=outcome,
+                weight=weight,
+                raw_weight=raw_weight,
+                confidence=confidence,
+                unit=unit,
+                value=value,
+                note=note,
+                observed_at=observed_at,
+            )
+        # Legacy format: plain Source payload
+        source = Source(
+            kind=str(payload.get("kind", "unknown")),
+            ref=str(payload.get("ref", "")),
+            note=payload.get("note"),
+        )
+        return Evidence(
+            source=source,
+            outcome=str(payload.get("outcome", "support")),
+            weight=_to_float(payload.get("weight"), 0.0) if "weight" in payload else 0.0,
+            raw_weight=None,
+            confidence=None,
+            unit=payload.get("unit"),
+            value=payload.get("value"),
+            note=payload.get("note"),
+            observed_at=payload.get("observed_at", default_time),
+        )
+    return None
+
+
+def _normalise_evidence_list(
+    payload: Any,
+    *,
+    default_outcome: str,
+    default_weight: float,
+    default_confidence: Optional[float],
+    default_unit: Optional[str],
+    default_note: Optional[str],
+    timestamp: str,
+) -> List[Evidence]:
+    if payload is None:
+        return []
+    if isinstance(payload, Mapping) and "source" in payload:
+        payload = [payload]
+    if isinstance(payload, Iterable) and not isinstance(payload, (str, bytes)):
+        entries: List[Evidence] = []
+        for item in payload:
+            evidence = _deserialize_evidence(item, default_time=timestamp)
+            if evidence is None:
+                continue
+            if not evidence.outcome:
+                evidence.outcome = default_outcome
+            if not evidence.weight and default_weight:
+                evidence.weight = default_weight
+            if evidence.confidence is None and default_confidence is not None:
+                evidence.confidence = default_confidence
+            if evidence.unit is None:
+                evidence.unit = default_unit
+            if evidence.note is None and default_note:
+                evidence.note = default_note
+            if evidence.observed_at is None:
+                evidence.observed_at = timestamp
+            entries.append(evidence)
+        return entries
+    return []

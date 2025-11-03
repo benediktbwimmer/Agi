@@ -78,6 +78,7 @@ Useful commands:
 - `agi-cli memory replay path/to/manifest.json --working path/to/working_memory.json` – generate an experience replay chunk combining manifest and working-memory insights.
 - `agi-cli working summarize path/to/working_memory.json` – summarise deliberation attempts captured in working-memory snapshots.
 - `agi-cli run inspect path/to/run_dir --memory path/to/memory.jsonl` – inspect a run directory with manifest, working memory, and optional contextual memory snippets.
+- `agi-cli world beliefs artifacts/state/beliefs.json --detail --limit 5` – review current credence, variance, and supporting evidence for recorded claims.
 
 Useful environment toggles:
 

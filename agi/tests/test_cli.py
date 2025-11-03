@@ -11,6 +11,7 @@ from agi.src.core.memory import MemoryStore
 from agi.src.core.safety import RiskAssessment, SafetyDecision
 from agi.src.core.tools import SensorProfile, ToolCapability, ToolParameter, ToolSpec
 from agi.src.core.types import ToolResult
+from agi.src.core.world_model import WorldModel
 
 
 runner = CliRunner()
@@ -497,3 +498,52 @@ def test_memory_search_with_filters(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert len(payload) == 1
     assert payload[0]["type"] == "reflection"
+
+
+def test_world_beliefs_command(tmp_path: Path) -> None:
+    storage_path = tmp_path / "beliefs.json"
+    model = WorldModel(storage_path=storage_path)
+    model.update(
+        [
+            {
+                "claim_id": "claim-1",
+                "passed": True,
+                "weight": 1.2,
+                "confidence": 0.8,
+                "provenance": [{"kind": "tool", "ref": "call-1", "note": "run succeeded"}],
+            }
+        ]
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "world",
+            "beliefs",
+            str(storage_path),
+            "--detail",
+            "--evidence-limit",
+            "1",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload
+    record = payload[0]
+    assert record["claim_id"] == "claim-1"
+    assert "confidence_interval" in record
+    assert "evidence" in record
+    assert len(record["evidence"]) == 1
+
+
+def test_world_beliefs_invalid_payload(tmp_path: Path) -> None:
+    storage_path = tmp_path / "broken.json"
+    storage_path.write_text("{broken", encoding="utf-8")
+
+    result = runner.invoke(app, ["world", "beliefs", str(storage_path)])
+
+    assert result.exit_code != 0
+    assert "Failed to load world model" in result.stderr

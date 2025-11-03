@@ -388,6 +388,11 @@ def test_orchestrator_replans_with_critic_feedback(tmp_path):
     manifest = json.loads(manifest_path.read_text())
     assert manifest["critiques"][0]["plan_id"] == "plan-risky"
     assert manifest["critiques"][0]["status"] == "REVISION"
+    belief = world_model.beliefs["claim-risk"]
+    critic_evidence = [entry for entry in belief.evidence if entry.source.kind == "critic"]
+    assert critic_evidence
+    assert any(entry.outcome == "conflict" for entry in critic_evidence)
+    assert any(entry.outcome == "support" for entry in belief.evidence if entry.source.kind == "tool")
 
 
 def test_orchestrator_recovers_from_execution_failure(tmp_path):
@@ -483,6 +488,11 @@ def test_orchestrator_recovers_from_execution_failure(tmp_path):
     assert [result["call_id"] for result in manifest["tool_results"]] == [
         "stable-step"
     ]
+    belief = world_model.beliefs["claim-unstable"]
+    execution_evidence = [entry for entry in belief.evidence if entry.source.kind == "execution"]
+    assert execution_evidence
+    assert any(entry.outcome == "conflict" for entry in execution_evidence)
+    assert any(entry.outcome == "support" for entry in belief.evidence if entry.source.kind == "tool")
 
 
 def test_orchestrator_populates_working_memory(tmp_path):

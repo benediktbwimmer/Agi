@@ -63,7 +63,26 @@ class Gatekeeper:
                 min_credence = float(rule.get("min_credence", 0.6))
             except (TypeError, ValueError):
                 min_credence = 0.6
-            if belief.credence >= min_credence:
+            degrade = belief.credence < min_credence
+            max_uncertainty = rule.get("max_uncertainty")
+            if max_uncertainty is not None:
+                try:
+                    threshold = float(max_uncertainty)
+                except (TypeError, ValueError):
+                    threshold = None
+                if threshold is not None and belief.uncertainty > threshold:
+                    degrade = True
+            max_interval = rule.get("max_confidence_interval")
+            if max_interval is not None:
+                try:
+                    interval_threshold = float(max_interval)
+                except (TypeError, ValueError):
+                    interval_threshold = None
+                if interval_threshold is not None:
+                    lower, upper = belief.confidence_interval
+                    if (upper - lower) > interval_threshold:
+                        degrade = True
+            if not degrade:
                 continue
             tools = rule.get("tools")
             if tools:
