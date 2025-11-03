@@ -1,34 +1,34 @@
-# Memory subsystem
+# Memory Subsystem
 
-AGI threads context across tool invocations via a two-tier memory system when it
-is enabled. This document covers the working-memory cache, the episodic store,
-and how the orchestrator coordinates them during a run.
+The Putnam-inspired stack threads context across tool invocations via a
+two-tier memory system. Working memory offers a per-run scratchpad, while
+episodic memory keeps a durable log of significant episodes that future runs
+can recall.
 
 ## Overview
 
-- **Working memory** is a lightweight, per-run cache. It keeps the most recent
-  tool episodes close to the next invocation so that intermediate results remain
-  available without re-querying persistent storage.
-- **Episodic memory** is a persistent log of significant tool executions. It is
-  durable across runs and serves as the backing store for longer-term recalls.
+- **Working memory** is an in-process cache that stores the latest episodes for
+  the active run. It is flushed once the run completes. Tools receive a
+  serialised view via `RunContext.working_memory`.
+- **Episodic memory** persists JSONL entries under `artifacts/memory.jsonl` by
+  default. Tools can pull additional context on demand using
+  `RunContext.recall_from_episodic(...)`, and the CLI can inspect, search, and
+  summarise the log.
 
-Both tiers are optional and can be disabled entirely, yielding stateless tool
-executions.
+Both tiers can be disabled for stateless execution.
 
 ## Execution lifecycle
 
-1. **Hydration.** Before executing a plan the orchestrator primes working
-   memory. It pulls recent episodic entries for the relevant claims and tools
-   and merges them into the cache so the upcoming tool calls receive enriched
-   context.
-2. **Tool execution.** Each tool invocation receives a `RunContext` containing
-   the hydrated working-memory slice together with a
-   `recall_from_episodic()` helper. Tools can call the helper with optional
-   `tool`, `limit`, and `text_query` arguments to retrieve additional history on
-   demand.
-3. **Commit.** Once a tool completes, the orchestrator promotes the new episode
-   back into the cache and—if it is deemed significant—appends it to episodic
-   memory for future runs.
+1. **Hydration.** Before executing a plan, the orchestrator primes working
+   memory. Recent episodic entries for relevant claims/tools are merged into the
+   cache so upcoming tool calls receive enriched context.
+2. **Tool execution.** Each invocation receives a `RunContext` containing the
+   hydrated working-memory slice plus a `recall_from_episodic()` helper. Tools
+   may call the helper with `tool`, `limit`, or `text_query` filters to fetch
+   additional history on demand.
+3. **Commit.** After a tool completes, the orchestrator promotes the new episode
+   into the cache and—if significant—appends it to episodic memory for future
+   runs.
 
 ## Runtime configuration
 
@@ -38,27 +38,53 @@ Memory is toggled via the `AGI_ENABLE_MEMORY` environment variable:
 # enable memory (default)
 export AGI_ENABLE_MEMORY=1
 
-# disable memory hydration and storage
+# disable hydration/storage entirely
 export AGI_ENABLE_MEMORY=0
 ```
 
 When disabled the orchestrator still constructs a valid `RunContext`, but the
-working-memory list is empty and `recall_from_episodic()` is a no-op.
+working-memory list is empty and `recall_from_episodic()` becomes a no-op. You
+can point the orchestrator at a different episodic file by passing a custom
+`MemoryStore` or setting `Orchestrator.episodic_memory_path`.
 
-By default the episodic log is written to `<working_dir>/memory.jsonl` (with
-`working_dir` defaulting to `artifacts/`) and the working cache remains in
-memory. Callers may supply custom `MemoryStore` or `WorkingMemory` instances to
-override these defaults while keeping the hydration pipeline intact.
+## Semantic retrieval
+
+When `faiss-cpu` is installed the semantic search path uses a hashed vector
+index (`MemoryVectorIndex`). Records that include an `embedding` payload are
+added automatically, and semantic search responses expose
+`vector_similarity` scores alongside lexical hits. See
+`tests/test_orchestrator.py::test_orchestrator_surfaces_vector_similarity_in_memory_context`
+for an end-to-end example. Without embeddings the index falls back to hashing
+record text, still surfacing similarity metadata when the query and stored
+records share vocabulary.
+
+## Inspecting memory with the CLI
+
+The Typer CLI exposes helpers for common inspection tasks:
+
+```bash
+# show the latest records (filter by type if needed)
+agi-cli memory recent artifacts/memory.jsonl --type episode --limit 3
+
+# semantic search with safety filters
+agi-cli memory search artifacts/memory.jsonl "lunar" --type reflection --limit 5
+
+# consolidate reflection insights and write back summaries
+agi-cli memory reflect artifacts/memory.jsonl --goal demo --write-back
+
+# inspect an orchestrator run directory with working/episodic context
+agi-cli run inspect artifacts/run_*/ --memory artifacts/memory.jsonl --sample 2
+```
 
 ## Validating behaviour
 
-Run the focused tests below to verify the end-to-end memory flow:
+Run the focused tests below to verify the hydration/commit loop:
 
 ```bash
 pytest agi/tests/test_orchestrator.py::test_orchestrator_hydrates_working_memory \
        agi/tests/test_tools_contract.py::test_retrieval_tool_filters_memory
 ```
 
-These tests confirm that working memory is hydrated before tool execution, that
-episodic recalls respect filtering semantics, and that new episodes are
-committed for subsequent runs.
+End-to-end coverage ensures working memory is hydrated before execution,
+episodic recalls respect filters, and significant episodes are committed for
+subsequent runs. The CLI tests also validate inspection flows (`agi/tests/test_cli.py`).

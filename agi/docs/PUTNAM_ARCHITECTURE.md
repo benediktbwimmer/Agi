@@ -58,6 +58,10 @@ records in memory and updating the world model.
 * **Faiss vector memory (`agi/src/core/vector_index.py`)** – Memory entries are embedded
   into a Faiss-backed index, with similarity scores surfaced alongside lexical confidence
   so the workspace can rank perceptual evidence using both symbolic and geometric cues.
+* **Variance-tracking world model (`agi/src/core/world_model.py`)** – Beliefs now retain
+  structured evidence with per-source weights and inferred confidence intervals, allowing
+  downstream planners and governance guards to reason about uncertainty and conflicting
+  observations without reconstructing provenance.
 
 ## 3. Cognitive Workspace Layer
 

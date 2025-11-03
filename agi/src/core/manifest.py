@@ -22,7 +22,7 @@ from .tools import ToolSpec
 from .types import Belief, ToolResult
 
 
-MANIFEST_SCHEMA_VERSION = "0.1.0"
+MANIFEST_SCHEMA_VERSION = "0.2.0"
 
 
 class ManifestSource(BaseModel):
@@ -46,13 +46,32 @@ class ManifestToolResult(BaseModel):
     provenance: Sequence[ManifestSource] = Field(default_factory=list)
 
 
+class ManifestEvidenceEntry(BaseModel):
+    """Structured evidence backing a belief update."""
+
+    source: ManifestSource
+    outcome: str
+    weight: float | None = None
+    raw_weight: float | None = None
+    confidence: float | None = None
+    unit: str | None = None
+    value: Any = None
+    note: str | None = None
+    observed_at: str | None = None
+
+
 class ManifestBeliefUpdate(BaseModel):
     """Serialised representation of :class:`Belief`."""
 
     claim_id: str
     credence: float
-    evidence: Sequence[ManifestSource] = Field(default_factory=list)
     last_updated: str
+    support: float | None = None
+    conflict: float | None = None
+    variance: float | None = None
+    uncertainty: float | None = None
+    confidence_interval: Sequence[float] | None = None
+    evidence: Sequence[ManifestEvidenceEntry] = Field(default_factory=list)
 
 
 class ManifestSafetyDecision(BaseModel):
@@ -177,13 +196,53 @@ class RunManifest(BaseModel):
                     normalised.append(item)
             return normalised
 
+        def _normalise_beliefs(items: Iterable[Any]) -> list[Any]:
+            normalised: list[Any] = []
+            for item in items:
+                if isinstance(item, Belief):
+                    interval = [float(value) for value in item.confidence_interval]
+                    evidence = [
+                        {
+                            "source": asdict(ev.source),
+                            "outcome": ev.outcome,
+                            "weight": ev.weight,
+                            "raw_weight": ev.raw_weight,
+                            "confidence": ev.confidence,
+                            "unit": ev.unit,
+                            "value": ev.value,
+                            "note": ev.note,
+                            "observed_at": ev.observed_at,
+                        }
+                        for ev in item.evidence
+                    ]
+                    normalised.append(
+                        {
+                            "claim_id": item.claim_id,
+                            "credence": item.credence,
+                            "last_updated": item.last_updated,
+                            "support": item.support,
+                            "conflict": item.conflict,
+                            "variance": item.variance,
+                            "uncertainty": item.uncertainty,
+                            "confidence_interval": interval,
+                            "evidence": evidence,
+                        }
+                    )
+                elif isinstance(item, BaseModel):
+                    normalised.append(item.model_dump())
+                elif is_dataclass(item):
+                    normalised.append(asdict(item))
+                else:
+                    normalised.append(item)
+            return normalised
+
         manifest = cls(
             run_id=run_id,
             created_at=created_at,
             goal=dict(goal),
             constraints=dict(constraints),
             tool_results=_normalise(tool_results),
-            belief_updates=_normalise(belief_updates),
+            belief_updates=_normalise_beliefs(belief_updates),
             safety_audit=_normalise(safety_audit),
             risk_assessments=_normalise(risk_assessments or []),
             critiques=_normalise(critiques or []),
@@ -210,6 +269,7 @@ class RunManifest(BaseModel):
 __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "ManifestBeliefUpdate",
+    "ManifestEvidenceEntry",
     "ManifestCritique",
     "ManifestRiskAssessment",
     "ManifestToolCapability",
@@ -220,4 +280,3 @@ __all__ = [
     "ManifestToolResult",
     "RunManifest",
 ]
-

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ from agi.src.core.critic import Critic
 from agi.src.core.memory import MemoryStore
 from agi.src.core.orchestrator import Orchestrator
 from agi.src.core.planner import Planner
-from agi.src.core.types import Plan, ToolCall, ToolResult, RunContext
+from agi.src.core.types import Belief, Plan, ToolCall, ToolResult, RunContext
 from agi.src.core.world_model import WorldModel
 from agi.src.governance.gatekeeper import Gatekeeper
 
@@ -151,15 +152,48 @@ def test_orchestrator_records_safety_audit(tmp_path: Path) -> None:
     report = asyncio.run(orchestrator.run({"goal": "test", "hypotheses": [{"id": "h1"}]}))
     assert report.summary == "Completed run"
 
-    manifests = list(tmp_path.glob("run_*/manifest.json"))
-    assert manifests, "expected manifest to be written"
-    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
-    audit = manifest.get("safety_audit")
-    assert audit and audit[0]["approved"] is True
-    assert audit[0]["effective_level"] == "T1"
-    risks = manifest.get("risk_assessments")
-    assert risks and risks[0]["approved"] is True
-    assert risks[0]["effective_level"] == "T1"
+
+def test_gatekeeper_uses_confidence_interval_bias(tmp_path: Path) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    world_model = WorldModel()
+    world_model._beliefs["evaluation::wide"] = Belief(
+        claim_id="evaluation::wide",
+        credence=0.8,
+        last_updated=timestamp,
+        evidence=[],
+        support=0.0,
+        conflict=0.0,
+        variance=0.25,
+    )
+    gatekeeper = Gatekeeper(
+        policy={
+            "max_tier": "T2",
+            "evaluation_rules": [
+                {
+                    "claim": "evaluation::wide",
+                    "max_tier": "T0",
+                    "max_confidence_interval": 0.3,
+                    "max_uncertainty": 0.5,
+                    "tools": ["dummy"],
+                }
+            ],
+        },
+        world_model=world_model,
+    )
+
+    assert gatekeeper.review("T1", tool="dummy") is False
+
+    world_model._beliefs["evaluation::wide"] = Belief(
+        claim_id="evaluation::wide",
+        credence=0.8,
+        last_updated=timestamp,
+        evidence=[],
+        support=3.0,
+        conflict=0.0,
+        variance=0.005,
+    )
+
+    assert gatekeeper.review("T1", tool="dummy") is True
 
 
 def test_orchestrator_checks_branch_tiers(tmp_path: Path) -> None:

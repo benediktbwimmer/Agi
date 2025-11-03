@@ -20,10 +20,18 @@ def test_world_model_updates_and_checks_units():
             }
         ]
     )
-    assert updates[0].credence > 0.5
-    assert math.isclose(updates[0].support, 1.5)
-    assert math.isclose(updates[0].conflict, 0.0)
-    assert 0.0 < updates[0].uncertainty < 1.0
+    belief = updates[0]
+    assert belief.credence > 0.5
+    assert math.isclose(belief.support, 1.5)
+    assert math.isclose(belief.conflict, 0.0)
+    assert 0.0 < belief.uncertainty < 1.0
+    assert belief.variance <= 1.0
+    lower, upper = belief.confidence_interval
+    assert 0.0 <= lower <= belief.credence <= upper <= 1.0
+    assert belief.evidence
+    evidence_entry = belief.evidence[-1]
+    assert evidence_entry.outcome == "support"
+    assert evidence_entry.source.ref == "artifact.txt"
 
     try:
         wm.update(
@@ -58,6 +66,7 @@ def test_world_model_confidence_scales_weight():
     ])[0]
     expected = _logistic_update(0.5, True, weight=1.5 * 0.25)
     assert math.isclose(result.credence, expected)
+    assert result.evidence[-1].confidence == pytest.approx(0.25)
 
 
 def test_world_model_rejects_negative_weight():
@@ -85,6 +94,7 @@ def test_world_model_tracks_evidence_strength():
     assert math.isclose(first.support, 1.0)
     assert math.isclose(first.conflict, 0.0)
     assert first.uncertainty < 1.0
+    assert first.latest_evidence is not None
 
     second = wm.update([
         {"claim_id": "strength", "passed": False, "weight": 0.5}
@@ -92,3 +102,40 @@ def test_world_model_tracks_evidence_strength():
     assert math.isclose(second.support, 1.0)
     assert math.isclose(second.conflict, 0.5)
     assert second.uncertainty < first.uncertainty
+    assert second.variance < first.variance
+    assert second.latest_evidence is not None
+
+
+def test_world_model_uses_structured_evidence_payload():
+    wm = WorldModel()
+    belief = wm.update(
+        [
+            {
+                "claim_id": "structured",
+                "passed": True,
+                "evidence": [
+                    {
+                        "source": {"kind": "tool", "ref": "call-1"},
+                        "outcome": "support",
+                        "weight": 0.8,
+                        "confidence": 0.6,
+                        "unit": "probability",
+                        "value": 0.72,
+                        "note": "calibrated observation",
+                    },
+                    {
+                        "source": {"kind": "critic", "ref": "reviewer"},
+                        "outcome": "conflict",
+                        "weight": 0.4,
+                        "confidence": 0.9,
+                        "note": "edge case missing",
+                    },
+                ],
+            }
+        ]
+    )[0]
+    assert len(belief.evidence) == 2
+    outcomes = {entry.outcome for entry in belief.evidence}
+    assert outcomes == {"support", "conflict"}
+    assert belief.support >= 0.8
+    assert belief.conflict >= 0.4

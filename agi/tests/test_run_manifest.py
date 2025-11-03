@@ -78,7 +78,14 @@ def test_run_manifest_matches_schema(tmp_path):
     assert manifest.schema_version == MANIFEST_SCHEMA_VERSION
     assert manifest.goal["goal"] == "demo"
     assert manifest.tool_results[0].call_id == "step-1"
-    assert manifest.belief_updates[0].claim_id == "claim-1"
+    belief = manifest.belief_updates[0]
+    assert belief.claim_id == "claim-1"
+    assert belief.support is not None
+    assert belief.conflict is not None
+    assert belief.variance is not None
+    assert belief.confidence_interval is not None
+    assert belief.evidence
+    assert belief.evidence[0].source.ref
     assert manifest.risk_assessments == []
     assert manifest.critiques == []
     assert manifest.tool_catalog

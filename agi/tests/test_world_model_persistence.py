@@ -31,9 +31,12 @@ def test_world_model_persists_and_recovers_state(tmp_path: Path) -> None:
     data = _read_json(storage)
     assert data["revision"] == 1
     assert data["beliefs"][0]["claim_id"] == "alpha"
-    assert data["beliefs"][0]["evidence"][0]["ref"] == "artifact.txt"
+    evidence_entry = data["beliefs"][0]["evidence"][0]
+    assert evidence_entry["source"]["ref"] == "artifact.txt"
+    assert evidence_entry["outcome"] == "support"
     assert math.isclose(data["beliefs"][0]["support"], 1.5)
     assert math.isclose(data["beliefs"][0]["conflict"], 0.0)
+    assert "variance" in data["beliefs"][0]
 
     history_path = storage.with_suffix(storage.suffix + ".history.jsonl")
     assert history_path.exists()
@@ -64,7 +67,8 @@ def test_world_model_persists_and_recovers_state(tmp_path: Path) -> None:
     assert "alpha" in beliefs
     assert beliefs["alpha"].credence == second_updates[0].credence
     # Evidence collected across runs should persist
-    assert beliefs["alpha"].evidence[0].ref == "artifact.txt"
+    evidence = beliefs["alpha"].evidence[0]
+    assert evidence.source.ref == "artifact.txt"
     assert math.isclose(beliefs["alpha"].support, 1.5)
     assert math.isclose(beliefs["alpha"].conflict, 1.5)
-
+    assert beliefs["alpha"].variance <= 1.0

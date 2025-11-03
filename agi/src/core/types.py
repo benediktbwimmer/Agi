@@ -30,6 +30,27 @@ class Source:
 
 
 @dataclass
+class Evidence:
+    """Structured evidence captured during belief updates."""
+
+    source: Source
+    outcome: str
+    weight: float
+    raw_weight: Optional[float] = None
+    confidence: Optional[float] = None
+    unit: Optional[str] = None
+    value: Optional[Any] = None
+    note: Optional[str] = None
+    observed_at: Optional[str] = None
+
+    def is_support(self) -> bool:
+        return self.outcome.lower() == "support"
+
+    def is_conflict(self) -> bool:
+        return self.outcome.lower() == "conflict"
+
+
+@dataclass
 class Claim:
     """A declarative claim the system is attempting to verify."""
 
@@ -386,10 +407,17 @@ class Belief:
 
     claim_id: UID
     credence: float
-    evidence: List[Source]
     last_updated: str
+    evidence: List[Evidence]
     support: float = 0.0
     conflict: float = 0.0
+    variance: float = 1.0
+
+    @property
+    def latest_evidence(self) -> Optional[Evidence]:
+        if not self.evidence:
+            return None
+        return self.evidence[-1]
 
     @property
     def evidence_strength(self) -> float:
@@ -411,6 +439,15 @@ class Belief:
         if total <= 0:
             return 1.0
         return math.exp(-total)
+
+    @property
+    def confidence_interval(self) -> tuple[float, float]:
+        """Approximate 95% confidence interval around the credence."""
+
+        margin = 1.96 * math.sqrt(max(self.variance, 1e-9))
+        lower = max(0.0, self.credence - margin)
+        upper = min(1.0, self.credence + margin)
+        return (lower, upper)
 
 
 @dataclass
@@ -449,6 +486,7 @@ __all__ = [
     "BranchCondition",
     "Belief",
     "Claim",
+    "Evidence",
     "Plan",
     "PlanBranch",
     "PlanStep",
@@ -461,4 +499,3 @@ __all__ = [
     "ToolResult",
     "UID",
 ]
-

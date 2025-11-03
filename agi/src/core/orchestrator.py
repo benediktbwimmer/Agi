@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
 from .critic import Critic
 from .manifest import RunManifest
@@ -24,7 +24,7 @@ from .safety import (
 )
 from .tools import ToolSpec, describe_tool
 from .telemetry import Telemetry
-from .types import BranchCondition, Plan, PlanStep, Report, RunContext, ToolResult
+from .types import Belief, BranchCondition, Plan, PlanStep, Report, RunContext, ToolResult
 from .world_model import WorldModel
 from ..governance.gatekeeper import Gatekeeper
 
@@ -509,6 +509,35 @@ class Orchestrator:
             payload["references"] = references
         return payload
 
+    def _record_belief_updates(
+        self,
+        payloads: Iterable[Mapping[str, Any]],
+        *,
+        run_id: str,
+        context: str,
+    ) -> List[Belief]:
+        payload_list = [
+            json.loads(json.dumps(payload))
+            for payload in payloads
+            if payload
+        ]
+        if not payload_list:
+            return []
+        updates = self.world_model.update(payload_list)
+        for belief in updates:
+            self._emit(
+                "orchestrator.belief_updated",
+                run_id=run_id,
+                context=context,
+                claim_id=belief.claim_id,
+                credence=belief.credence,
+                support=belief.support,
+                conflict=belief.conflict,
+                uncertainty=belief.uncertainty,
+                confidence_interval=belief.confidence_interval,
+            )
+        return updates
+
     async def run(self, goal_spec: Dict[str, Any], constraints: Dict[str, Any] | None = None) -> Report:
         constraints = constraints or {}
         run_id = uuid.uuid4().hex
@@ -629,6 +658,16 @@ class Orchestrator:
                     plan_id=plan.id,
                     tags=critique_record.get("rationale_tags"),
                 )
+                critique_updates = _critique_updates(
+                    plan=plan,
+                    critique=critique_record,
+                    goal_spec=goal_spec,
+                )
+                self._record_belief_updates(
+                    critique_updates,
+                    run_id=run_id,
+                    context="critic_review",
+                )
                 memory_entries.append(
                     _critique_memory_record(
                         critique_record,
@@ -694,6 +733,16 @@ class Orchestrator:
                 execution_feedback = _build_execution_feedback(
                     plans, attempt_result_indices, failing_plan_ids
                 )
+                failure_updates = _execution_failure_updates(
+                    plans=plans,
+                    feedback=execution_feedback,
+                    goal_spec=goal_spec,
+                )
+                self._record_belief_updates(
+                    failure_updates,
+                    run_id=run_id,
+                    context="execution_failure",
+                )
                 for item in execution_feedback:
                     self._emit(
                         "orchestrator.plan_execution_failed",
@@ -724,18 +773,41 @@ class Orchestrator:
         update_payloads: List[Dict[str, Any]] = []
         for plan in plans:
             claim_ids = list(plan.claim_ids) or [plan.id]
-            plan_ok = all(res.ok for res in plan_results.get(plan.id, []))
+            plan_tool_results = plan_results.get(plan.id, [])
+            plan_ok = all(res.ok for res in plan_tool_results)
             provenance = [
                 asdict(src)
-                for res in plan_results.get(plan.id, [])
+                for res in plan_tool_results
                 for src in res.provenance
             ]
+            plan_critiques = [crit for crit in critiques if crit.get("plan_id") == plan.id]
+            plan_safety_checks = [decision for decision in safety_audit if decision.plan_id == plan.id]
+            plan_risk_reviews = [
+                assessment for assessment in risk_assessments if assessment.plan_id == plan.id
+            ]
+            plan_confidence = _estimate_plan_confidence(
+                plan_tool_results,
+                plan_critiques,
+                plan_ok,
+            )
+            plan_evidence_payload = _assemble_plan_evidence(
+                plan_tool_results,
+                plan_critiques,
+                plan_safety_checks,
+                plan_risk_reviews,
+            )
+            success_count = sum(1 for result in plan_tool_results if result.ok)
+            total_calls = len(plan_tool_results)
+            outcome_note = _summarise_plan_outcome(plan.id, success_count, total_calls, plan_ok)
             for claim_id in claim_ids:
                 update_payloads.append(
                     {
                         "claim_id": claim_id,
                         "passed": plan_ok,
                         "provenance": provenance,
+                        "confidence": plan_confidence,
+                        "evidence": plan_evidence_payload,
+                        "note": outcome_note,
                         "expected_unit": goal_spec.get("expected_unit"),
                         "observed_unit": goal_spec.get(
                             "observed_unit", goal_spec.get("expected_unit")
@@ -743,14 +815,11 @@ class Orchestrator:
                     }
                 )
 
-        updates = self.world_model.update(update_payloads)
-        for belief in updates:
-            self._emit(
-                "orchestrator.belief_updated",
-                run_id=run_id,
-                claim_id=belief.claim_id,
-                credence=belief.credence,
-            )
+        updates = self._record_belief_updates(
+            update_payloads,
+            run_id=run_id,
+            context="plan_outcome",
+        )
 
         manifest = RunManifest.build(
             run_id=run_id,
@@ -890,6 +959,223 @@ def _critique_memory_record(
     if critique.get("rationale_tags"):
         entry["rationale_tags"] = critique["rationale_tags"]
     return entry
+
+
+def _assemble_plan_evidence(
+    tool_results: List[ToolResult],
+    critiques: List[Mapping[str, Any]],
+    safety_checks: List[SafetyDecision],
+    risk_reviews: List[RiskAssessment],
+) -> List[Dict[str, Any]]:
+    evidence: List[Dict[str, Any]] = []
+    for result in tool_results:
+        weight = 1.0 if result.ok else 1.25
+        confidence = 0.9 if result.ok else 0.75
+        note = result.stdout.strip() if result.stdout else None
+        evidence.append(
+            {
+                "source": {
+                    "kind": "tool",
+                    "ref": result.call_id,
+                    "note": note,
+                },
+                "outcome": "support" if result.ok else "conflict",
+                "weight": weight,
+                "confidence": confidence,
+                "value": result.data if result.data is not None else result.stdout,
+                "unit": "observation",
+            }
+        )
+    for critique in critiques:
+        status = str(critique.get("status", "FAIL")).upper()
+        outcome = "support" if status == "PASS" else "conflict"
+        confidence = 0.7 if status == "PASS" else 0.85
+        note = critique.get("summary") or critique.get("notes")
+        evidence.append(
+            {
+                "source": {
+                    "kind": "critic",
+                    "ref": critique.get("reviewer", "critic"),
+                    "note": note,
+                },
+                "outcome": outcome,
+                "weight": 0.6,
+                "confidence": confidence,
+                "value": critique.get("issues") or critique.get("amendments"),
+                "unit": "analysis",
+            }
+        )
+    for decision in safety_checks:
+        evidence.append(
+            {
+                "source": {
+                    "kind": "gatekeeper",
+                    "ref": decision.tool_name,
+                    "note": decision.reason,
+                },
+                "outcome": "support" if decision.approved else "conflict",
+                "weight": 0.75,
+                "confidence": 0.8,
+                "unit": "policy",
+            }
+        )
+    for assessment in risk_reviews:
+        evidence.append(
+            {
+                "source": {
+                    "kind": "risk",
+                    "ref": assessment.tool_name,
+                    "note": assessment.reason,
+                },
+                "outcome": "support" if assessment.approved else "conflict",
+                "weight": 0.5,
+                "confidence": 0.7,
+                "unit": "policy",
+            }
+        )
+    return evidence
+
+
+def _estimate_plan_confidence(
+    tool_results: List[ToolResult],
+    critiques: List[Mapping[str, Any]],
+    plan_ok: bool,
+) -> float:
+    if not tool_results:
+        base = 0.5
+    else:
+        successes = sum(1 for result in tool_results if result.ok)
+        base = successes / len(tool_results)
+    if any(str(crit.get("status", "")).upper() != "PASS" for crit in critiques):
+        base *= 0.65
+    if not plan_ok:
+        base *= 0.5
+    return max(0.05, min(1.0, base))
+
+
+def _summarise_plan_outcome(
+    plan_id: str,
+    success_count: int,
+    total_calls: int,
+    plan_ok: bool,
+) -> str:
+    if total_calls:
+        success_pct = (success_count / total_calls) * 100.0
+        stats = f"{success_count}/{total_calls} tool calls succeeded ({success_pct:.0f}%)"
+    else:
+        stats = "no tool calls executed"
+    status = "succeeded" if plan_ok else "encountered failures"
+    return f"Plan {plan_id} {status}; {stats}."
+
+
+def _critique_updates(
+    *,
+    plan: Plan,
+    critique: Mapping[str, Any],
+    goal_spec: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    status = str(critique.get("status", "FAIL")).upper()
+    outcome = "support" if status == "PASS" else "conflict"
+    weight = 0.6
+    if status == "REVISION":
+        confidence = 0.65
+    elif status == "PASS":
+        confidence = 0.85
+    else:
+        confidence = 0.9
+    value: Dict[str, Any] = {}
+    if critique.get("issues"):
+        value["issues"] = list(critique["issues"])
+    if critique.get("amendments"):
+        value["amendments"] = list(critique["amendments"])
+    if critique.get("summary"):
+        value["summary"] = critique["summary"]
+    note = critique.get("notes") or critique.get("summary")
+    reviewer = critique.get("reviewer", "critic")
+    claim_ids = list(plan.claim_ids) or [plan.id]
+    timestamp = goal_spec.get("time") or _now_iso()
+    updates: List[Dict[str, Any]] = []
+    for claim_id in claim_ids:
+        updates.append(
+            {
+                "claim_id": claim_id,
+                "passed": status == "PASS",
+                "weight": weight,
+                "confidence": confidence,
+                "timestamp": timestamp,
+                "note": note,
+                "evidence": [
+                    {
+                        "source": {
+                            "kind": "critic",
+                            "ref": reviewer,
+                            "note": note,
+                        },
+                        "outcome": outcome,
+                        "weight": weight,
+                        "confidence": confidence,
+                        "unit": "critique",
+                        "value": value or None,
+                        "observed_at": timestamp,
+                    }
+                ],
+            }
+        )
+    return updates
+
+
+def _execution_failure_updates(
+    *,
+    plans: Sequence[Plan],
+    feedback: Iterable[Mapping[str, Any]],
+    goal_spec: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    plan_map = {plan.id: plan for plan in plans}
+    timestamp = goal_spec.get("time") or _now_iso()
+    updates: List[Dict[str, Any]] = []
+    for item in feedback:
+        plan_id = item.get("plan_id")
+        plan = plan_map.get(str(plan_id))
+        if plan is None:
+            continue
+        failures = item.get("failures") or []
+        if not failures:
+            continue
+        claim_ids = list(plan.claim_ids) or [plan.id]
+        note = f"Execution failed for plan {plan.id}"
+        for claim_id in claim_ids:
+            evidence_entries = []
+            for failure in failures:
+                evidence_entries.append(
+                    {
+                        "source": {
+                            "kind": "execution",
+                            "ref": str(failure.get("tool") or failure.get("step_id")),
+                            "note": failure.get("stdout"),
+                        },
+                        "outcome": "conflict",
+                        "weight": 0.8,
+                        "confidence": 0.6,
+                        "unit": "execution",
+                        "value": {
+                            "step_id": failure.get("step_id"),
+                            "stdout": failure.get("stdout"),
+                        },
+                        "observed_at": timestamp,
+                    }
+                )
+            updates.append(
+                {
+                    "claim_id": claim_id,
+                    "passed": False,
+                    "weight": 0.8,
+                    "confidence": 0.6,
+                    "timestamp": timestamp,
+                    "note": note,
+                    "evidence": evidence_entries,
+                }
+            )
+    return updates
 
 
 def _derive_rationale_tags(critique: Mapping[str, Any]) -> List[str]:

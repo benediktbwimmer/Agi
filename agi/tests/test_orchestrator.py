@@ -388,6 +388,11 @@ def test_orchestrator_replans_with_critic_feedback(tmp_path):
     manifest = json.loads(manifest_path.read_text())
     assert manifest["critiques"][0]["plan_id"] == "plan-risky"
     assert manifest["critiques"][0]["status"] == "REVISION"
+    belief = world_model.beliefs["claim-risk"]
+    critic_evidence = [entry for entry in belief.evidence if entry.source.kind == "critic"]
+    assert critic_evidence
+    assert any(entry.outcome == "conflict" for entry in critic_evidence)
+    assert any(entry.outcome == "support" for entry in belief.evidence if entry.source.kind == "tool")
 
 
 def test_orchestrator_recovers_from_execution_failure(tmp_path):
@@ -483,6 +488,11 @@ def test_orchestrator_recovers_from_execution_failure(tmp_path):
     assert [result["call_id"] for result in manifest["tool_results"]] == [
         "stable-step"
     ]
+    belief = world_model.beliefs["claim-unstable"]
+    execution_evidence = [entry for entry in belief.evidence if entry.source.kind == "execution"]
+    assert execution_evidence
+    assert any(entry.outcome == "conflict" for entry in execution_evidence)
+    assert any(entry.outcome == "support" for entry in belief.evidence if entry.source.kind == "tool")
 
 
 def test_orchestrator_populates_working_memory(tmp_path):
@@ -703,3 +713,74 @@ def test_orchestrator_builds_memory_context_for_planner(tmp_path):
     summary_data = json.loads(summary_file.read_text())
     assert summary_data["sample_size"] >= 1
     assert summary_data["goal"] == "Design lunar habitat"
+
+
+def test_orchestrator_surfaces_vector_similarity_in_memory_context(tmp_path):
+    pytest.importorskip("faiss")
+
+    captured: Dict[str, Any] = {}
+
+    def llm(payload: Dict[str, Any]) -> str:
+        captured["payload"] = json.loads(json.dumps(payload))
+        return json.dumps(
+            {
+                "plans": [
+                    {
+                        "id": "plan-vector",
+                        "claim_ids": ["vector-claim"],
+                        "steps": [
+                            {
+                                "id": "step-vector",
+                                "tool": "analysis_tool",
+                                "args": {},
+                                "safety_level": "T0",
+                            }
+                        ],
+                        "expected_cost": {},
+                        "risks": [],
+                        "ablations": [],
+                    }
+                ]
+            }
+        )
+
+    planner = Planner(llm=llm)
+    critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    memory.append(
+        {
+            "id": "rec-1",
+            "type": "reflection",
+            "summary": "Lunar telemetry anomaly detected",
+            "time": "2024-01-01T00:00:00+00:00",
+            "sensor": {"modality": "analysis", "trust": "medium"},
+            "keywords": ["lunar", "telemetry"],
+        }
+    )
+
+    world_model = WorldModel()
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools={"analysis_tool": StubTool(ok=True)},
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+    )
+
+    asyncio.run(
+        orchestrator.run(
+            {"goal": "Investigate lunar telemetry anomaly"}, {}
+        )
+    )
+
+    payload = captured.get("payload")
+    assert payload is not None, "expected planner payload"
+    memory_context = payload.get("memory_context")
+    assert memory_context is not None, "planner payload missing memory_context"
+    semantic = memory_context.get("semantic")
+    assert semantic and semantic.get("matches"), "expected semantic matches"
+    similarity_summary = semantic.get("similarity") or {}
+    assert similarity_summary.get("max", 0) > 0
+    first_match = semantic["matches"][0]
+    assert first_match.get("vector_similarity", 0) > 0
