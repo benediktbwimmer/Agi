@@ -1,0 +1,161 @@
+:root {
+  color-scheme: light dark;
+  font-family: "Inter", "Segoe UI", sans-serif;
+  --accent: #346df1;
+  --bg: #f5f7fb;
+  --border: #ccd4e0;
+  --surface: rgba(255, 255, 255, 0.9);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: #111827;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  padding: 1.5rem 2rem;
+  background: var(--surface);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
+}
+
+header h1 {
+  margin: 0 0 0.25rem 0;
+  font-size: 1.75rem;
+}
+
+.subtitle {
+  margin: 0;
+  color: #4b5563;
+}
+
+main {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem 2rem 2rem;
+  flex: 1 1 auto;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 220px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.panel-header button {
+  border: none;
+  background: var(--accent);
+  color: white;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.95rem;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  max-height: 320px;
+}
+
+.list li {
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.list li:hover,
+.list li.active {
+  background: rgba(52, 109, 241, 0.12);
+}
+
+.scroll {
+  overflow-y: auto;
+  max-height: 320px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.pre {
+  background: rgba(15, 23, 42, 0.04);
+  border-radius: 6px;
+  padding: 0.5rem;
+  white-space: pre-wrap;
+}
+
+.approval-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  background: white;
+}
+
+.approval-card h3 {
+  margin: 0 0 0.25rem 0;
+  font-size: 1rem;
+}
+
+.approval-card p {
+  margin: 0.2rem 0;
+}
+
+.approval-actions {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.approval-actions button {
+  border: none;
+  border-radius: 4px;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+}
+
+button.approve {
+  background: #16a34a;
+  color: white;
+}
+
+button.deny {
+  background: #dc2626;
+  color: white;
+}
+
+footer {
+  padding: 0.75rem 2rem;
+  font-size: 0.85rem;
+  color: #4b5563;
+}
+
+@media (max-width: 768px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+  .scroll {
+    max-height: 240px;
+  }
+}

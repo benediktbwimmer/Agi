@@ -68,6 +68,24 @@ def summarise_working_memory(working_memory: "WorkingMemory" | None) -> Dict[str
     if failure_motifs:
         summary["failure_motifs"] = failure_motifs
 
+    plan_trace_summary = _collect_plan_traces(attempts)
+    if plan_trace_summary:
+        summary["plan_hierarchy"] = plan_trace_summary
+
+    branch_decisions = _collect_branch_decisions(attempts)
+    if branch_decisions:
+        summary["branch_decisions"] = branch_decisions
+
+    negotiation_count = len(working_memory.negotiations or [])
+    if negotiation_count:
+        summary["negotiations"] = {
+            "count": negotiation_count,
+            "recent": [
+                dict(item) if isinstance(item, Mapping) else item
+                for item in working_memory.negotiations[-5:]
+            ],
+        }
+
     return summary
 
 
@@ -137,6 +155,81 @@ def _normalise_failure(data: Mapping[str, Any], plan_id: str | None) -> Dict[str
     if stdout:
         payload["stdout"] = stdout
     return payload
+
+
+def _collect_plan_traces(attempts: Sequence["DeliberationAttempt"], *, depth_limit: int = 3, max_nodes: int = 60) -> List[Dict[str, Any]]:
+    traces: List[Dict[str, Any]] = []
+
+    def _walk(step: Any, depth: int, lines: List[str], remaining: List[int]) -> None:
+        if depth > depth_limit or remaining[0] <= 0 or step is None:
+            return
+        indent = "  " * depth
+        label = getattr(step, "step_id", getattr(step, "id", "<step>"))
+        kind = getattr(step, "kind", None)
+        status = getattr(step, "status", "unknown")
+        tool = getattr(step, "tool", None)
+        line = f"{indent}- {label}"
+        if kind:
+            line += f" [{kind}]"
+        agent = getattr(step, "agent", None)
+        if agent:
+            line += f" agent={agent}"
+        if tool:
+            line += f" tool={tool}"
+        line += f" status={status}"
+        lines.append(line)
+        remaining[0] -= 1
+        if remaining[0] <= 0:
+            return
+        for child in getattr(step, "children", []) or []:
+            _walk(child, depth + 1, lines, remaining)
+            if remaining[0] <= 0:
+                return
+        for branch in getattr(step, "branches", []) or []:
+            index = getattr(branch, "index", "?")
+            taken = getattr(branch, "taken", None)
+            condition = getattr(branch, "condition", None)
+            branch_prefix = "  " * (depth + 1)
+            lines.append(f"{branch_prefix}? branch[{index}] taken={taken} condition={condition}")
+            remaining[0] -= 1
+            if remaining[0] <= 0:
+                return
+            for branch_step in getattr(branch, "steps", []) or []:
+                _walk(branch_step, depth + 2, lines, remaining)
+                if remaining[0] <= 0:
+                    return
+
+    for attempt in attempts:
+        if not attempt.plans:
+            continue
+        attempt_entry: Dict[str, Any] = {"attempt": attempt.index, "plans": []}
+        for plan in attempt.plans:
+            structure: List[str] = []
+            remaining = [max_nodes]
+            for root in getattr(plan, "steps", []) or []:
+                _walk(root, 0, structure, remaining)
+                if remaining[0] <= 0:
+                    break
+            attempt_entry["plans"].append(
+                {
+                    "plan_id": plan.plan_id,
+                    "approved": plan.approved,
+                    "execution_succeeded": plan.execution_succeeded,
+                    "structure": structure,
+                }
+            )
+        traces.append(attempt_entry)
+    return traces
+
+
+def _collect_branch_decisions(attempts: Sequence["DeliberationAttempt"]) -> List[Dict[str, Any]]:
+    decisions: List[Dict[str, Any]] = []
+    for attempt in attempts:
+        for entry in attempt.branch_log:
+            record = dict(entry)
+            record["attempt"] = attempt.index
+            decisions.append(record)
+    return decisions
 
 
 def normalise_insight_records(raw: Any) -> List[Mapping[str, Any]]:

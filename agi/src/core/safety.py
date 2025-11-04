@@ -114,7 +114,21 @@ def enforce_plan_safety(
             tool_level = getattr(tool, "safety", "T0")
             requested_level = step.safety_level or tool_level
             effective = _max_tier(requested_level, tool_level)
-            approved = gatekeeper.review(effective, tool=step.tool)
+            context = {
+                "plan_id": plan.id,
+                "step_id": step.id,
+                "requested_level": requested_level,
+                "tool_level": tool_level,
+                "effective_level": effective,
+            }
+            if step.args:
+                context["args"] = dict(step.args)
+            if step.description:
+                context["description"] = step.description
+            if step.goal:
+                context["goal"] = step.goal
+            context["agent"] = step.agent
+            approved = gatekeeper.review(effective, tool=step.tool, context=context)
             decision = SafetyDecision(
                 plan_id=plan.id,
                 step_id=step.id,
@@ -151,7 +165,21 @@ def assess_step_risk(
     tool_level = getattr(tool, "safety", "T0")
     requested_level = step.safety_level or tool_level
     effective = _max_tier(requested_level, tool_level)
-    approved = gatekeeper.review(effective, tool=step.tool)
+    context = {
+        "plan_id": plan.id,
+        "step_id": step.id,
+        "requested_level": requested_level,
+        "tool_level": tool_level,
+        "effective_level": effective,
+    }
+    if step.args:
+        context["args"] = dict(step.args)
+    if step.description:
+        context["description"] = step.description
+    if step.goal:
+        context["goal"] = step.goal
+    context["agent"] = step.agent
+    approved = gatekeeper.review(effective, tool=step.tool, context=context)
     reason: Optional[str] = None if approved else f"Gatekeeper denied tier {effective}"
     return RiskAssessment(
         plan_id=plan.id,
@@ -163,4 +191,3 @@ def assess_step_risk(
         approved=approved,
         reason=reason,
     )
-

@@ -22,7 +22,8 @@ from .tools import ToolSpec
 from .types import Belief, ToolResult
 
 
-MANIFEST_SCHEMA_VERSION = "0.2.0"
+MANIFEST_SCHEMA_VERSION = "0.4.0"
+_SCHEMA_FILENAME = "run_manifest.schema.json"
 
 
 class ManifestSource(BaseModel):
@@ -141,6 +142,64 @@ class ManifestToolSpec(BaseModel):
     sensor_profile: dict[str, Any] | None = None
 
 
+class ManifestPlanBranch(BaseModel):
+    index: int
+    condition: Any
+    taken: bool | None = None
+    steps: Sequence["ManifestPlanStep"] = Field(default_factory=list)
+
+
+class ManifestPlanStep(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    id: str
+    goal: str | None = None
+    tool: str | None = None
+    agent: str | None = None
+    kind: str
+    depth: int
+    parent_id: str | None = None
+    branch_index: int | None = None
+    branch_condition: Any = None
+    status: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    duration_ms: float | None = None
+    failure_reason: str | None = None
+    children: Sequence["ManifestPlanStep"] = Field(default_factory=list)
+    branches: Sequence[ManifestPlanBranch] = Field(default_factory=list)
+
+
+class ManifestPlan(BaseModel):
+    plan_id: str
+    claim_ids: Sequence[str]
+    approved: bool | None = None
+    execution_succeeded: bool | None = None
+    steps: Sequence[ManifestPlanStep] = Field(default_factory=list)
+
+
+if hasattr(ManifestPlanStep, "model_rebuild"):
+    ManifestPlanStep.model_rebuild()
+if hasattr(ManifestPlanBranch, "model_rebuild"):
+    ManifestPlanBranch.model_rebuild()
+
+
+class ManifestNegotiationMessage(BaseModel):
+    timestamp: str
+    sender: str
+    recipient: str
+    kind: str
+    content: dict[str, Any] = Field(default_factory=dict)
+    outcomes: dict[str, Any] = Field(default_factory=dict)
+
+
+class ManifestAgentProfile(BaseModel):
+    name: str
+    description: str | None = None
+    default: bool = False
+    tool_names: Sequence[str] = Field(default_factory=list)
+
+
 class RunManifest(BaseModel):
     """Versioned manifest describing an orchestrator execution."""
 
@@ -155,6 +214,9 @@ class RunManifest(BaseModel):
     risk_assessments: Sequence[ManifestRiskAssessment] = Field(default_factory=list)
     critiques: Sequence[ManifestCritique] = Field(default_factory=list)
     tool_catalog: Sequence[ManifestToolSpec] = Field(default_factory=list)
+    plans: Sequence[ManifestPlan] = Field(default_factory=list)
+    agents: Sequence[ManifestAgentProfile] = Field(default_factory=list)
+    negotiations: Sequence[ManifestNegotiationMessage] = Field(default_factory=list)
 
     @field_validator("created_at")
     @classmethod
@@ -180,6 +242,9 @@ class RunManifest(BaseModel):
         risk_assessments: Iterable[RiskAssessment] | None = None,
         critiques: Iterable[Mapping[str, Any]] | None = None,
         tool_catalog: Iterable[ToolSpec] | Iterable[Mapping[str, Any]] | None = None,
+        plans: Iterable[Mapping[str, Any]] | Iterable[ManifestPlan] | None = None,
+        agents: Iterable[Mapping[str, Any]] | Iterable[ManifestAgentProfile] | None = None,
+        negotiations: Iterable[Any] | None = None,
     ) -> "RunManifest":
         """Construct a manifest from runtime dataclasses."""
 
@@ -247,6 +312,9 @@ class RunManifest(BaseModel):
             risk_assessments=_normalise(risk_assessments or []),
             critiques=_normalise(critiques or []),
             tool_catalog=_normalise(tool_catalog or []),
+            plans=_normalise(plans or []),
+            agents=_normalise(agents or []),
+            negotiations=_normalise(negotiations or []),
         )
         return manifest
 
@@ -266,6 +334,21 @@ class RunManifest(BaseModel):
         path.write_text(json.dumps(schema, indent=2), encoding="utf-8")
 
 
+def manifest_schema_path() -> Path:
+    """Return the path to the bundled manifest JSON schema."""
+
+    return Path(__file__).resolve().parent / "schemas" / _SCHEMA_FILENAME
+
+
+def load_manifest_schema() -> dict[str, Any]:
+    """Load the canonical manifest JSON schema bundled with the package."""
+
+    path = manifest_schema_path()
+    if not path.exists():  # pragma: no cover - packaging guard
+        raise FileNotFoundError(f"Manifest schema not found at {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "ManifestBeliefUpdate",
@@ -278,5 +361,12 @@ __all__ = [
     "ManifestSafetyDecision",
     "ManifestSource",
     "ManifestToolResult",
+    "ManifestPlan",
+    "ManifestPlanStep",
+    "ManifestPlanBranch",
+    "ManifestNegotiationMessage",
+    "ManifestAgentProfile",
     "RunManifest",
+    "load_manifest_schema",
+    "manifest_schema_path",
 ]

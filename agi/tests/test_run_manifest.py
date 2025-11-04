@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Any, Dict
 
 from agi.src.core.critic import Critic
-from agi.src.core.manifest import MANIFEST_SCHEMA_VERSION, RunManifest
+from agi.src.core.manifest import (
+    MANIFEST_SCHEMA_VERSION,
+    RunManifest,
+    manifest_schema_path,
+)
 from agi.src.core.memory import MemoryStore
 from agi.src.core.orchestrator import Orchestrator
 from agi.src.core.planner import Planner
@@ -91,6 +95,12 @@ def test_run_manifest_matches_schema(tmp_path):
     assert manifest.tool_catalog
     assert manifest.tool_catalog[0].name == "demo_tool"
     assert manifest.tool_catalog[0].safety_tier == "T0"
+    assert manifest.plans
+    root_step = manifest.plans[0].steps[0]
+    assert root_step.children
+    assert root_step.children[0].tool == "demo_tool"
+    assert root_step.children[0].agent in {None, "coordinator", "default"}
+    assert root_step.children[0].status == "succeeded"
 
     created = manifest.created_at
     assert created.endswith("+00:00"), "timestamp should include timezone"
@@ -109,3 +119,10 @@ def test_run_manifest_roundtrip(tmp_path):
 
     regenerated = RunManifest.model_validate_json(manifest.model_dump_json())
     assert regenerated.model_dump() == manifest.model_dump()
+
+
+def test_bundled_manifest_schema_matches_model():
+    schema_path = manifest_schema_path()
+    canonical_schema = json.loads(schema_path.read_text())
+    generated_schema = RunManifest.model_json_schema()
+    assert canonical_schema == generated_schema

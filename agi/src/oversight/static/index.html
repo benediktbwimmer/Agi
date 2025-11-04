@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AGI Oversight Console</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>AGI Oversight Console</h1>
+    <p class="subtitle">Monitor orchestrator runs, telemetry, and approval requests.</p>
+  </header>
+  <main>
+    <section class="panel" id="runs-panel">
+      <div class="panel-header">
+        <h2>Runs</h2>
+        <button id="refresh-runs" title="Refresh run list">⟳</button>
+      </div>
+      <ul id="runs-list" class="list"></ul>
+    </section>
+    <section class="panel" id="details-panel">
+      <div class="panel-header">
+        <h2>Run Details</h2>
+      </div>
+      <div id="run-details" class="scroll"></div>
+    </section>
+    <section class="panel" id="approvals-panel">
+      <div class="panel-header">
+        <h2>Approvals</h2>
+      </div>
+      <div id="approvals" class="scroll"></div>
+    </section>
+    <section class="panel" id="telemetry-panel">
+      <div class="panel-header">
+        <h2>Telemetry</h2>
+      </div>
+      <pre id="telemetry" class="scroll pre"></pre>
+    </section>
+    <section class="panel" id="memory-panel">
+      <div class="panel-header">
+        <h2>Memory Logs</h2>
+        <select id="memory-select"></select>
+      </div>
+      <pre id="memory-records" class="scroll pre"></pre>
+    </section>
+  </main>
+  <footer>
+    <span>Data refreshes automatically every few seconds. Use the refresh button for immediate updates.</span>
+  </footer>
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

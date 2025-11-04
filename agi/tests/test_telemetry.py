@@ -4,6 +4,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from agi.src.core.critic import Critic
 from agi.src.core.memory import MemoryStore
 from agi.src.core.orchestrator import Orchestrator
@@ -99,10 +101,13 @@ def test_orchestrator_emits_structured_events(tmp_path: Path) -> None:
     assert "orchestrator.run_started" in event_types
     assert "orchestrator.tool_started" in event_types
     assert "orchestrator.tool_completed" in event_types
+    assert "orchestrator.plan_step_started" in event_types
+    assert "orchestrator.plan_step_completed" in event_types
     assert "orchestrator.input_provenance_ready" in event_types
     assert "orchestrator.working_memory_persisted" in event_types
     assert "orchestrator.reflection_consolidated" in event_types
     assert "memory.append" in event_types
+    assert "memory.query" in event_types
     assert events[-1]["event"] == "orchestrator.run_completed"
 
     tool_started = next(event for event in events if event["event"] == "orchestrator.tool_started")
@@ -111,6 +116,13 @@ def test_orchestrator_emits_structured_events(tmp_path: Path) -> None:
     assert tool_started.get("references", {}).get("hypotheses") == ["hyp-1"]
     memory_refs = tool_started.get("references", {}).get("memory_records")
     assert memory_refs == ["reflection-1"]
+
+    tool_completed = next(event for event in events if event["event"] == "orchestrator.tool_completed")
+    assert tool_completed["duration_ms"] >= 0
+    assert tool_completed["wall_time_ms"] is not None
+
+    query_event = next(event for event in events if event["event"] == "memory.query")
+    assert query_event["duration_ms"] >= 0
 
 
 def test_orchestrator_emits_risk_events(tmp_path: Path) -> None:
@@ -124,6 +136,45 @@ def test_orchestrator_emits_risk_events(tmp_path: Path) -> None:
     assert events, "expected risk assessment event"
     assert events[0]["approved"] is True
     assert events[0]["effective_level"] == "T0"
+
+
+def test_orchestrator_emits_tool_failure_event(tmp_path: Path) -> None:
+    sink = InMemorySink()
+    orchestrator = _build_orchestrator(tmp_path, sink)
+    orchestrator.tools["worker"] = _StubTool(ok=False)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(orchestrator.run({"goal": "demo"}, {}))
+
+    failures = [event for event in sink.events if event["event"] == "orchestrator.tool_failed"]
+    assert failures, "expected tool failure telemetry"
+    assert failures[0]["tool"] == "worker"
+    assert failures[0]["duration_ms"] >= 0
+
+
+def test_memory_queries_emit_duration(tmp_path: Path) -> None:
+    sink = InMemorySink()
+    telemetry = Telemetry(sinks=[sink])
+    store = MemoryStore(tmp_path / "records.jsonl", telemetry=telemetry)
+    store.append(
+        {
+            "type": "episode",
+            "plan_id": "plan-1",
+            "tool": "worker",
+            "call_id": "step-1",
+            "time": "2024-01-01T00:00:00+00:00",
+        }
+    )
+
+    results = store.query_by_plan("plan-1")
+    assert results
+
+    query_events = [
+        event for event in sink.events if event["event"] == "memory.query" and event.get("method") == "plan"
+    ]
+    assert query_events, "expected query telemetry"
+    assert query_events[0]["result_count"] == 1
+    assert query_events[0]["duration_ms"] >= 0
 
 
 def test_json_lines_sink_writes_file(tmp_path: Path) -> None:

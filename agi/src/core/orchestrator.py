@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
 from .critic import Critic
@@ -24,7 +26,17 @@ from .safety import (
 )
 from .tools import ToolSpec, describe_tool
 from .telemetry import Telemetry
-from .types import Belief, BranchCondition, Plan, PlanStep, Report, RunContext, ToolResult
+from .types import (
+    AgentProfile,
+    Belief,
+    BranchCondition,
+    NegotiationMessage,
+    Plan,
+    PlanStep,
+    Report,
+    RunContext,
+    ToolResult,
+)
 from .world_model import WorldModel
 from ..governance.gatekeeper import Gatekeeper
 
@@ -108,6 +120,73 @@ def _summarise_memory_context(context: Mapping[str, Any] | None) -> Dict[str, An
     return summary or None
 
 
+def _negotiation_memory_records(
+    messages: Sequence[NegotiationMessage],
+    *,
+    run_id: str,
+    goal: str | None,
+) -> List[Dict[str, Any]]:
+    if not messages:
+        return []
+    goal_text = goal.strip() if isinstance(goal, str) else (str(goal) if goal else None)
+    pair_counts: Counter[tuple[str, str]] = Counter()
+    kind_counts: Counter[str] = Counter()
+    entries: List[Dict[str, Any]] = []
+    for message in messages:
+        payload = message.to_dict()
+        timestamp = payload.get("timestamp") or _now_iso()
+        sender = payload.get("sender") or "unknown"
+        recipient = payload.get("recipient") or "unknown"
+        kind = payload.get("kind") or "unspecified"
+        pair_counts[(sender, recipient)] += 1
+        kind_counts[kind.lower()] += 1
+        keywords = [
+            "negotiation",
+            f"{sender}->{recipient}",
+            sender,
+            recipient,
+            f"kind:{kind}",
+        ]
+        entry: Dict[str, Any] = {
+            "type": "negotiation",
+            "time": timestamp,
+            "run_id": run_id,
+            "goal": goal_text,
+            "sender": sender,
+            "recipient": recipient,
+            "kind": kind,
+            "agents": [agent for agent in {sender, recipient} if agent],
+            "content": payload.get("content") or {},
+            "outcomes": payload.get("outcomes") or {},
+            "keywords": [token for token in keywords if token],
+        }
+        entries.append(entry)
+    summary_time = entries[-1]["time"] if entries else _now_iso()
+    pair_summary = [
+        {"pair": f"{pair[0]}->{pair[1]}", "count": count}
+        for pair, count in pair_counts.most_common(5)
+    ]
+    kind_summary = [
+        {"kind": kind, "count": count} for kind, count in kind_counts.most_common()
+    ]
+    agent_set = sorted({msg.sender for msg in messages} | {msg.recipient for msg in messages})
+    summary_keywords = ["negotiation_summary"]
+    summary_keywords.extend(pair["pair"] for pair in pair_summary[:3])
+    summary_entry: Dict[str, Any] = {
+        "type": "negotiation_summary",
+        "time": summary_time,
+        "run_id": run_id,
+        "goal": goal_text,
+        "negotiation_count": len(messages),
+        "pairs": pair_summary,
+        "kinds": kind_summary,
+        "agents": agent_set,
+        "keywords": summary_keywords,
+    }
+    entries.append(summary_entry)
+    return entries
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -134,6 +213,168 @@ def _build_input_provenance(
 
 
 @dataclass
+class PlanBranchTrace:
+    """Execution metadata for a conditional branch within a plan step."""
+
+    index: int
+    condition: Any
+    steps: List["PlanStepTrace"] = field(default_factory=list)
+    taken: Optional[bool] = None
+
+    def mark_decision(self, taken: bool) -> None:
+        self.taken = taken
+        if not taken:
+            for step in self.steps:
+                step.mark_skipped()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "index": self.index,
+            "condition": self.condition,
+            "taken": self.taken,
+            "steps": [step.to_dict() for step in self.steps],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "PlanBranchTrace":
+        index = int(payload.get("index", 0))
+        condition = payload.get("condition")
+        taken = payload.get("taken")
+        steps_payload = payload.get("steps", [])
+        steps: List["PlanStepTrace"] = []
+        if isinstance(steps_payload, Iterable) and not isinstance(steps_payload, (str, bytes)):
+            for item in steps_payload:
+                if isinstance(item, Mapping):
+                    steps.append(PlanStepTrace.from_dict(item))
+        instance = cls(index=index, condition=condition, steps=steps, taken=taken)
+        if taken is False:
+            for step in instance.steps:
+                step.status = "skipped"
+        return instance
+
+
+@dataclass
+class PlanStepTrace:
+    """Runtime trace for a single plan step."""
+
+    step_id: str
+    goal: Optional[str]
+    tool: Optional[str]
+    agent: Optional[str]
+    kind: str
+    depth: int
+    parent_id: Optional[str] = None
+    branch_index: Optional[int] = None
+    branch_condition: Any = None
+    status: str = "pending"
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    duration_ms: Optional[float] = None
+    failure_reason: Optional[str] = None
+    children: List["PlanStepTrace"] = field(default_factory=list)
+    branches: List[PlanBranchTrace] = field(default_factory=list)
+    _runtime_started: Optional[float] = field(default=None, init=False, repr=False)
+
+    def mark_started(self) -> None:
+        if self.status in {"pending", "skipped"}:
+            self.status = "running"
+            self.started_at = datetime.now(timezone.utc).isoformat()
+            self._runtime_started = perf_counter()
+
+    def mark_completed(self, *, succeeded: bool, reason: Optional[str] = None) -> None:
+        if self.status == "completed":
+            return
+        if self.status != "running":
+            self.mark_started()
+        self.status = "succeeded" if succeeded else "failed"
+        self.completed_at = datetime.now(timezone.utc).isoformat()
+        if self._runtime_started is not None:
+            self.duration_ms = round((perf_counter() - self._runtime_started) * 1000, 3)
+        if not succeeded:
+            self.failure_reason = reason
+
+    def mark_skipped(self) -> None:
+        if self.status == "completed":
+            return
+        self.status = "skipped"
+        self.started_at = self.started_at or datetime.now(timezone.utc).isoformat()
+        self.completed_at = self.completed_at or self.started_at
+        self.duration_ms = self.duration_ms or 0.0
+        for child in self.children:
+            child.mark_skipped()
+        for branch in self.branches:
+            branch.mark_decision(False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.step_id,
+            "goal": self.goal,
+            "tool": self.tool,
+            "agent": self.agent,
+            "kind": self.kind,
+            "depth": self.depth,
+            "parent_id": self.parent_id,
+            "branch_index": self.branch_index,
+            "branch_condition": self.branch_condition,
+            "status": self.status,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "duration_ms": self.duration_ms,
+            "failure_reason": self.failure_reason,
+            "children": [child.to_dict() for child in self.children],
+            "branches": [branch.to_dict() for branch in self.branches],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "PlanStepTrace":
+        instance = cls(
+            step_id=str(payload.get("id", "")),
+            goal=payload.get("goal"),
+            tool=payload.get("tool"),
+            agent=payload.get("agent"),
+            kind=str(payload.get("kind", "atomic")),
+            depth=int(payload.get("depth", 0)),
+            parent_id=payload.get("parent_id"),
+            branch_index=payload.get("branch_index"),
+            branch_condition=payload.get("branch_condition"),
+            status=str(payload.get("status", "pending")),
+            started_at=payload.get("started_at"),
+            completed_at=payload.get("completed_at"),
+            duration_ms=payload.get("duration_ms"),
+            failure_reason=payload.get("failure_reason"),
+        )
+        children_payload = payload.get("children", [])
+        if isinstance(children_payload, Iterable) and not isinstance(children_payload, (str, bytes)):
+            instance.children = [
+                PlanStepTrace.from_dict(item)
+                for item in children_payload
+                if isinstance(item, Mapping)
+            ]
+        branch_payload = payload.get("branches", [])
+        if isinstance(branch_payload, Iterable) and not isinstance(branch_payload, (str, bytes)):
+            instance.branches = [
+                PlanBranchTrace.from_dict(item)
+                for item in branch_payload
+                if isinstance(item, Mapping)
+            ]
+        return instance
+
+    def iter_all(self) -> Iterable["PlanStepTrace"]:
+        yield self
+        for child in self.children:
+            yield from child.iter_all()
+        for branch in self.branches:
+            for step in branch.steps:
+                yield from step.iter_all()
+
+    def get_branch(self, index: int) -> Optional[PlanBranchTrace]:
+        for branch in self.branches:
+            if branch.index == index:
+                return branch
+        return None
+
+
+@dataclass
 class PlanTrace:
     """Snapshot of deliberation information for a single plan."""
 
@@ -143,6 +384,18 @@ class PlanTrace:
     approved: Optional[bool] = None
     execution_succeeded: Optional[bool] = None
     rationale_tags: Set[str] = field(default_factory=set)
+    steps: List[PlanStepTrace] = field(default_factory=list)
+    _step_index: Dict[str, PlanStepTrace] = field(default_factory=dict, init=False, repr=False)
+
+    def attach_structure(self, plan_steps: Sequence[PlanStep]) -> None:
+        self.steps = [_build_step_trace(step, depth=0, parent_id=None) for step in plan_steps]
+        self._step_index.clear()
+        for root in self.steps:
+            for trace in root.iter_all():
+                self._step_index[trace.step_id] = trace
+
+    def get_step(self, step_id: str) -> Optional[PlanStepTrace]:
+        return self._step_index.get(step_id)
 
     def mark_approved(self) -> None:
         self.approved = True
@@ -158,6 +411,32 @@ class PlanTrace:
             if tag:
                 self.rationale_tags.add(str(tag))
 
+    def mark_step_started(self, step_id: str) -> None:
+        trace = self._step_index.get(step_id)
+        if trace is not None:
+            trace.mark_started()
+
+    def mark_step_completed(self, step_id: str, *, succeeded: bool, reason: Optional[str] = None) -> None:
+        trace = self._step_index.get(step_id)
+        if trace is not None:
+            trace.mark_completed(succeeded=succeeded, reason=reason)
+
+    def mark_step_skipped(self, step_id: str) -> None:
+        trace = self._step_index.get(step_id)
+        if trace is not None:
+            trace.mark_skipped()
+
+    def record_branch_decision(self, step_id: str, branch_index: int, taken: bool) -> None:
+        trace = self._step_index.get(step_id)
+        if trace is None:
+            return
+        branch = trace.get_branch(branch_index)
+        if branch is not None:
+            branch.mark_decision(taken)
+            if taken is False:
+                for child in branch.steps:
+                    child.mark_skipped()
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "plan_id": self.plan_id,
@@ -166,6 +445,7 @@ class PlanTrace:
             "approved": self.approved,
             "execution_succeeded": self.execution_succeeded,
             "rationale_tags": sorted(self.rationale_tags),
+            "steps": [step.to_dict() for step in self.steps],
         }
 
     @classmethod
@@ -190,14 +470,99 @@ class PlanTrace:
         rationale_tags: Set[str] = set()
         if isinstance(raw_tags, Iterable) and not isinstance(raw_tags, (str, bytes)):
             rationale_tags = {str(tag) for tag in raw_tags if tag}
-        return cls(
+        steps_payload = payload.get("steps", [])
+        steps: List[PlanStepTrace] = []
+        if isinstance(steps_payload, Iterable) and not isinstance(steps_payload, (str, bytes)):
+            for item in steps_payload:
+                if isinstance(item, Mapping):
+                    steps.append(PlanStepTrace.from_dict(item))
+        instance = cls(
             plan_id=plan_id,
             claim_ids=claim_ids,
             step_count=step_count,
             approved=approved,
             execution_succeeded=execution_succeeded,
             rationale_tags=rationale_tags,
+            steps=steps,
         )
+        for root in instance.steps:
+            for trace in root.iter_all():
+                instance._step_index[trace.step_id] = trace
+        return instance
+
+    def to_manifest(self) -> Dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "claim_ids": list(self.claim_ids),
+            "approved": self.approved,
+            "execution_succeeded": self.execution_succeeded,
+            "steps": [step.to_dict() for step in self.steps],
+        }
+
+
+@dataclass
+class AgentRuntime:
+    """Execution context for a collaborating agent."""
+
+    name: str
+    tools: Mapping[str, Any]
+    memory: MemoryStore
+
+
+def _infer_step_kind(step: PlanStep) -> str:
+    if step.tool and step.sub_steps:
+        return "tool_with_substeps"
+    if step.tool:
+        return "tool"
+    if step.sub_steps:
+        return "composite"
+    if step.branches:
+        return "branch"
+    return "noop"
+
+
+def _build_step_trace(
+    step: PlanStep,
+    *,
+    depth: int,
+    parent_id: Optional[str],
+    branch_index: Optional[int] = None,
+    branch_condition: Any = None,
+) -> PlanStepTrace:
+    trace = PlanStepTrace(
+        step_id=step.id,
+        goal=step.goal,
+        tool=step.tool,
+        agent=step.agent,
+        kind=_infer_step_kind(step),
+        depth=depth,
+        parent_id=parent_id,
+        branch_index=branch_index,
+        branch_condition=branch_condition,
+    )
+    trace.children = [
+        _build_step_trace(child, depth=depth + 1, parent_id=step.id)
+        for child in step.sub_steps
+    ]
+    trace.branches = []
+    for idx, branch in enumerate(step.branches):
+        branch_payload = branch.condition.to_payload()
+        branch_trace = PlanBranchTrace(
+            index=idx,
+            condition=branch_payload,
+            steps=[
+                _build_step_trace(
+                    child,
+                    depth=depth + 1,
+                    parent_id=step.id,
+                    branch_index=idx,
+                    branch_condition=branch_payload,
+                )
+                for child in branch.steps
+            ],
+        )
+        trace.branches.append(branch_trace)
+    return trace
 
 
 @dataclass
@@ -213,14 +578,16 @@ class DeliberationAttempt:
     hypotheses: List[Dict[str, Any]] = field(default_factory=list)
     branch_log: List[Dict[str, Any]] = field(default_factory=list)
     critic_rationales: List[Dict[str, Any]] = field(default_factory=list)
+    negotiations: List[Dict[str, Any]] = field(default_factory=list)
     _plan_index: Dict[str, PlanTrace] = field(default_factory=dict, init=False, repr=False)
 
     def register_plan(self, plan: Plan) -> PlanTrace:
         trace = PlanTrace(
             plan_id=plan.id,
             claim_ids=list(plan.claim_ids),
-            step_count=len(plan.steps),
+            step_count=sum(1 for _ in plan.iter_tool_calls()) or len(plan.steps),
         )
+        trace.attach_structure(plan.steps)
         self.plans.append(trace)
         self._plan_index[plan.id] = trace
         return trace
@@ -282,6 +649,21 @@ class DeliberationAttempt:
         if metadata:
             entry["metadata"] = json.loads(json.dumps(metadata))
         self.branch_log.append(entry)
+        plan = self._plan_index.get(plan_id)
+        if plan is not None and metadata is not None:
+            branch_index = metadata.get("index")
+            if branch_index is not None:
+                try:
+                    branch_index_int = int(branch_index)
+                except (TypeError, ValueError):
+                    branch_index_int = None
+            else:
+                branch_index_int = None
+            if branch_index_int is not None:
+                plan.record_branch_decision(step_id=step_id, branch_index=branch_index_int, taken=taken)
+
+    def record_negotiation(self, message: NegotiationMessage) -> None:
+        self.negotiations.append(message.to_dict())
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -294,6 +676,7 @@ class DeliberationAttempt:
             "hypotheses": json.loads(json.dumps(self.hypotheses)),
             "branch_log": [dict(item) for item in self.branch_log],
             "critic_rationales": [dict(item) for item in self.critic_rationales],
+            "negotiations": [dict(item) for item in self.negotiations],
         }
 
     @classmethod
@@ -350,6 +733,11 @@ class DeliberationAttempt:
             attempt.critic_rationales = [
                 dict(item) for item in rationale_payload if isinstance(item, Mapping)
             ]
+        negotiation_payload = payload.get("negotiations", [])
+        if isinstance(negotiation_payload, Iterable) and not isinstance(negotiation_payload, (str, bytes)):
+            attempt.negotiations = [
+                dict(item) for item in negotiation_payload if isinstance(item, Mapping)
+            ]
         return attempt
 
 
@@ -363,6 +751,7 @@ class WorkingMemory:
     attempts: List[DeliberationAttempt] = field(default_factory=list)
     input_provenance: Dict[str, Any] | None = None
     context_features: Dict[str, Any] | None = None
+    negotiations: List[Dict[str, Any]] = field(default_factory=list)
 
     def start_attempt(self, index: int) -> DeliberationAttempt:
         attempt = DeliberationAttempt(index=index)
@@ -380,6 +769,8 @@ class WorkingMemory:
                 entry["branch_log"] = [dict(item) for item in attempt.branch_log]
             if attempt.critic_rationales:
                 entry["critic_rationales"] = [dict(item) for item in attempt.critic_rationales]
+            if attempt.negotiations:
+                entry["negotiations"] = [dict(item) for item in attempt.negotiations[-5:]]
             if len(entry) > 2:
                 attempts_payload.append(entry)
         if attempts_payload:
@@ -397,6 +788,8 @@ class WorkingMemory:
             payload["input_provenance"] = json.loads(json.dumps(self.input_provenance))
         if self.context_features is not None:
             payload["context_features"] = json.loads(json.dumps(self.context_features))
+        if self.negotiations:
+            payload["negotiations"] = [dict(item) for item in self.negotiations]
         scratchpad = self.scratchpad
         if scratchpad:
             payload["scratchpad"] = scratchpad
@@ -431,6 +824,11 @@ class WorkingMemory:
         features = payload.get("context_features")
         if isinstance(features, Mapping):
             instance.context_features = json.loads(json.dumps(features))
+        negotiations_payload = payload.get("negotiations", [])
+        if isinstance(negotiations_payload, Iterable) and not isinstance(negotiations_payload, (str, bytes)):
+            instance.negotiations = [
+                dict(item) for item in negotiations_payload if isinstance(item, Mapping)
+            ]
         return instance
 
 
@@ -441,6 +839,7 @@ class Orchestrator:
     tools: Mapping[str, Any]
     memory: MemoryStore
     world_model: WorldModel
+    agents: Mapping[str, Mapping[str, Any]] | None = None
     gatekeeper: Gatekeeper | None = None
     working_dir: Path = Path("artifacts")
     telemetry: Telemetry | None = None
@@ -450,10 +849,27 @@ class Orchestrator:
     _working_memory: WorkingMemory | None = field(init=False, default=None, repr=False)
     _input_provenance: Dict[str, Any] | None = field(init=False, default=None, repr=False)
     _tool_specs: Dict[str, ToolSpec] = field(init=False, default_factory=dict, repr=False)
+    _agents: Dict[str, AgentRuntime] = field(init=False, default_factory=dict, repr=False)
+    _global_tools: Dict[str, Any] = field(init=False, default_factory=dict, repr=False)
+    _agent_profiles: List[AgentProfile] = field(init=False, default_factory=list, repr=False)
+    _negotiation_log: List[NegotiationMessage] = field(init=False, default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
         if self.memory_retriever is None:
             self.memory_retriever = MemoryRetriever(self.memory)
+        self._agents = {}
+        self._register_agent("default", tools=self.tools, memory=self.memory)
+        for name, spec in (self.agents or {}).items():
+            if not name:
+                continue
+            tools_obj = spec.get("tools") if isinstance(spec, Mapping) else None  # type: ignore[assignment]
+            tools_mapping = tools_obj if isinstance(tools_obj, Mapping) else self.tools
+            memory_override = spec.get("memory") if isinstance(spec, Mapping) else None  # type: ignore[assignment]
+            memory_store = memory_override if isinstance(memory_override, MemoryStore) else self.memory
+            self._register_agent(str(name), tools=tools_mapping, memory=memory_store)
+        self._recalculate_global_tools()
+        self._agent_profiles = []
+        self._negotiation_log = []
 
     def _emit(self, event: str, **payload: Any) -> None:
         if self.telemetry is not None:
@@ -478,6 +894,8 @@ class Orchestrator:
             step_payload["goal"] = step.goal
         if step.description:
             step_payload["description"] = step.description
+        if step.agent:
+            step_payload["agent"] = step.agent
         payload["step"] = step_payload
         references: Dict[str, Any] = {}
         inputs = payload.get("inputs") or {}
@@ -538,16 +956,114 @@ class Orchestrator:
             )
         return updates
 
+    def _log_negotiation(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        kind: str,
+        content: Mapping[str, Any] | None = None,
+        outcomes: Mapping[str, Any] | None = None,
+    ) -> None:
+        message = NegotiationMessage(
+            timestamp=_now_iso(),
+            sender=sender,
+            recipient=recipient,
+            kind=kind,
+            content=json.loads(json.dumps(content or {})),
+            outcomes=json.loads(json.dumps(outcomes or {})),
+        )
+        self._negotiation_log.append(message)
+        if self._working_memory is not None:
+            self._working_memory.negotiations.append(message.to_dict())
+            if self._working_memory.attempts:
+                self._working_memory.attempts[-1].record_negotiation(message)
+        self._emit(
+            "orchestrator.negotiation",
+            sender=sender,
+            recipient=recipient,
+            kind=kind,
+        )
+
+    def _default_agent_name(self) -> str:
+        for profile in self._agent_profiles:
+            if profile.default:
+                return profile.name
+        return "default"
+
+    def _ensure_agent_registered(self, agent_name: str) -> None:
+        if agent_name in self._agents:
+            return
+        base = self._agents.get("default")
+        if base is None:
+            return
+        self._register_agent(agent_name, tools=base.tools, memory=base.memory)
+        self._recalculate_global_tools()
+        self._emit("orchestrator.agent_auto_registered", agent=agent_name)
+
+    def _bootstrap_plan_negotiations(self, plan: Plan) -> None:
+        default_agent = self._default_agent_name()
+        agent_to_steps: Dict[str, List[str]] = {}
+        for step in plan.iter_tool_calls():
+            agent = step.agent or default_agent
+            agent_to_steps.setdefault(agent, []).append(step.id)
+            self._ensure_agent_registered(agent)
+        for agent, steps in agent_to_steps.items():
+            if agent == default_agent:
+                continue
+            self._log_negotiation(
+                sender=default_agent,
+                recipient=agent,
+                kind="delegation",
+                content={"plan_id": plan.id, "step_ids": steps},
+            )
+
+    def _register_agent(
+        self,
+        name: str,
+        *,
+        tools: Mapping[str, Any],
+        memory: MemoryStore,
+    ) -> None:
+        self._agents[name] = AgentRuntime(name=name, tools=tools, memory=memory)
+
+    def _recalculate_global_tools(self) -> None:
+        merged: Dict[str, Any] = {}
+        for agent in self._agents.values():
+            merged.update(agent.tools)
+        self._global_tools = merged
+
+    def _resolve_agent_context(self, agent_name: Optional[str]) -> AgentRuntime:
+        if agent_name and agent_name in self._agents:
+            return self._agents[agent_name]
+        fallback_ctx = self._agents.get("default")
+        if fallback_ctx is None and self._agents:
+            fallback_ctx = next(iter(self._agents.values()))
+        if fallback_ctx is None:
+            raise RuntimeError("No agents registered for orchestrator")
+        if agent_name and agent_name not in self._agents:
+            self._log_negotiation(
+                sender=fallback_ctx.name,
+                recipient=agent_name,
+                kind="fallback",
+                content={"reason": "agent_unknown"},
+                outcomes={"assigned_agent": fallback_ctx.name},
+            )
+            self._emit("orchestrator.agent_fallback", requested=agent_name, fallback=fallback_ctx.name)
+        return fallback_ctx
+
     async def run(self, goal_spec: Dict[str, Any], constraints: Dict[str, Any] | None = None) -> Report:
         constraints = constraints or {}
         run_id = uuid.uuid4().hex
         self._emit("orchestrator.run_started", run_id=run_id, goal=goal_spec.get("goal"))
         run_dir = self.working_dir / f"run_{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
+        self._agent_profiles = []
+        self._negotiation_log = []
 
         tool_catalog = [
             describe_tool(tool, override_name=name)
-            for name, tool in sorted(self.tools.items(), key=lambda item: item[0])
+            for name, tool in sorted(self._global_tools.items(), key=lambda item: item[0])
         ]
         self._tool_specs = {spec.name: spec for spec in tool_catalog}
 
@@ -579,27 +1095,35 @@ class Orchestrator:
             if isinstance(goal_text, str):
                 context_limit = int(goal_spec.get("memory_context_limit", 0)) or None
                 recent_limit = int(goal_spec.get("memory_recent_limit", 0)) or None
+                context_start = perf_counter()
                 context = self.memory_retriever.context_for_goal(
                     goal_text,
                     limit=context_limit,
                     recent=recent_limit,
                 )
+                context_duration = round((perf_counter() - context_start) * 1000, 3)
                 semantic_matches = context.get("semantic", {}).get("matches", []) if context.get("semantic") else []
                 recent_records = context.get("recent", {}).get("records", []) if context.get("recent") else []
-                if semantic_matches or recent_records:
+                insight_count = len(context.get("insights", []) or [])
+                features: Dict[str, Any] | None = None
+                if semantic_matches or recent_records or insight_count:
                     memory_context_payload = context
                     features = extract_memory_features(memory_context_payload)
                     if features:
                         memory_context_payload.setdefault("features", features)
                         if self._working_memory is not None:
                             self._working_memory.context_features = json.loads(json.dumps(features))
-                    self._emit(
-                        "orchestrator.memory_context_ready",
-                        run_id=run_id,
-                        semantic_matches=len(semantic_matches),
-                        recent_records=len(recent_records),
-                        features=features or None,
-                    )
+                else:
+                    features = None
+                self._emit(
+                    "orchestrator.memory_context_ready",
+                    run_id=run_id,
+                    semantic_matches=len(semantic_matches),
+                    recent_records=len(recent_records),
+                    insights=insight_count,
+                    features=features or None,
+                    duration_ms=context_duration,
+                )
 
         self._input_provenance = _build_input_provenance(
             goal_spec,
@@ -633,10 +1157,33 @@ class Orchestrator:
                 feedback=feedback,
                 memory_context=memory_context_payload,
             )
+            if attempt == 0:
+                planner_agents = self.planner.agent_profiles
+                if planner_agents:
+                    self._agent_profiles = planner_agents
+                    default_ctx = self._agents.get("default")
+                    if default_ctx is not None:
+                        for profile in planner_agents:
+                            if profile.default and profile.name not in self._agents:
+                                self._register_agent(profile.name, tools=default_ctx.tools, memory=default_ctx.memory)
+                    for profile in planner_agents:
+                        if profile.name in self._agents:
+                            continue
+                        if not profile.tool_names:
+                            continue
+                        tool_subset = {
+                            name: self._global_tools.get(name)
+                            for name in profile.tool_names
+                            if name in self._global_tools
+                        }
+                        if tool_subset:
+                            self._register_agent(profile.name, tools=tool_subset, memory=self.memory)
+                    self._recalculate_global_tools()
             plan_critiques: List[Dict[str, Any]] = []
             replan_required = False
             for plan in plans:
                 plan_trace = working_attempt.register_plan(plan)
+                self._bootstrap_plan_negotiations(plan)
                 self._emit(
                     "orchestrator.plan_ready",
                     run_id=run_id,
@@ -691,7 +1238,7 @@ class Orchestrator:
                 continue
 
             if self.gatekeeper is not None:
-                safety_audit = enforce_plan_safety(plans, self.tools, self.gatekeeper)
+                safety_audit = enforce_plan_safety(plans, self._global_tools, self.gatekeeper)
 
             attempt_tool_results: List[ToolResult] = []
             attempt_plan_results: Dict[str, List[ToolResult]] = {}
@@ -769,6 +1316,13 @@ class Orchestrator:
 
         for entry in memory_entries:
             self.memory.append(entry)
+        negotiation_entries = _negotiation_memory_records(
+            self._negotiation_log,
+            run_id=run_id,
+            goal=goal_spec.get("goal"),
+        )
+        for entry in negotiation_entries:
+            self.memory.append(entry)
 
         update_payloads: List[Dict[str, Any]] = []
         for plan in plans:
@@ -821,6 +1375,31 @@ class Orchestrator:
             context="plan_outcome",
         )
 
+        if not self._agent_profiles:
+            self._agent_profiles = [
+                AgentProfile(
+                    name=ctx.name,
+                    description=None,
+                    default=(ctx.name == "default"),
+                    tool_names=sorted(ctx.tools.keys()),
+                )
+                for ctx in self._agents.values()
+            ]
+
+        plan_manifest_payload = []
+        if working_attempt is not None:
+            plan_manifest_payload = [plan_trace.to_manifest() for plan_trace in working_attempt.plans]
+
+        agent_manifest_payload = [
+            {
+                "name": profile.name,
+                "description": profile.description,
+                "default": profile.default,
+                "tool_names": list(profile.tool_names),
+            }
+            for profile in self._agent_profiles
+        ]
+
         manifest = RunManifest.build(
             run_id=run_id,
             goal=goal_spec,
@@ -831,6 +1410,8 @@ class Orchestrator:
             risk_assessments=risk_assessments,
             critiques=critiques,
             tool_catalog=tool_catalog,
+            plans=plan_manifest_payload,
+            agents=agent_manifest_payload,
         )
         manifest.write(run_dir / "manifest.json")
         RunManifest.write_schema(run_dir / "manifest.schema.json")
@@ -1248,12 +1829,31 @@ async def _execute_plan_step(
     risk_assessments: List[RiskAssessment],
     working_attempt: DeliberationAttempt,
 ) -> None:
+    plan_trace = working_attempt._plan_index.get(plan.id)
+    step_trace = plan_trace.get_step(step.id) if plan_trace is not None else None
+    agent_ctx = orchestrator._resolve_agent_context(getattr(step, "agent", None))
+    agent_name = agent_ctx.name
+    default_agent_name = orchestrator._default_agent_name()
+    if step_trace is not None:
+        step_trace.agent = agent_name
+        step_trace.mark_started()
+        orchestrator._emit(
+            "orchestrator.plan_step_started",
+            run_id=run_id,
+            plan_id=plan.id,
+            step_id=step.id,
+            goal=step.goal,
+            tool=step.tool,
+            agent=agent_name,
+            kind=step_trace.kind,
+            depth=step_trace.depth,
+        )
     if step.tool:
-        tool = orchestrator.tools.get(step.tool)
+        tool = agent_ctx.tools.get(step.tool)
         if tool is None:
             raise KeyError(f"Unknown tool {step.tool}")
         if orchestrator.gatekeeper is not None:
-            assessment = assess_step_risk(plan, step, orchestrator.tools, orchestrator.gatekeeper)
+            assessment = assess_step_risk(plan, step, agent_ctx.tools, orchestrator.gatekeeper)
             risk_assessments.append(assessment)
             working_attempt.record_risk_assessment(assessment)
             orchestrator._emit(
@@ -1262,6 +1862,7 @@ async def _execute_plan_step(
                 plan_id=plan.id,
                 step_id=step.id,
                 tool=step.tool,
+                agent=agent_name,
                 approved=assessment.approved,
                 effective_level=assessment.effective_level,
                 reason=assessment.reason,
@@ -1276,6 +1877,7 @@ async def _execute_plan_step(
                 "tool_level": assessment.tool_level,
                 "effective_level": assessment.effective_level,
                 "time": goal_spec.get("time", "1970-01-01T00:00:00+00:00"),
+                "agent": agent_name,
             }
             if assessment.reason:
                 risk_entry["reason"] = assessment.reason
@@ -1298,6 +1900,26 @@ async def _execute_plan_step(
                     tool=step.tool,
                     effective_level=assessment.effective_level,
                     reason=assessment.reason,
+                    agent=agent_name,
+                )
+                if step_trace is not None:
+                    step_trace.mark_completed(succeeded=False, reason=assessment.reason)
+                orchestrator._emit(
+                    "orchestrator.plan_step_completed",
+                    run_id=run_id,
+                    plan_id=plan.id,
+                    step_id=step.id,
+                    success=False,
+                    reason=assessment.reason,
+                    duration_ms=step_trace.duration_ms if step_trace is not None else None,
+                    agent=agent_name,
+                )
+                orchestrator._log_negotiation(
+                    sender=agent_name,
+                    recipient=default_agent_name,
+                    kind="status",
+                    content={"plan_id": plan.id, "step_id": step.id},
+                    outcomes={"success": False, "reason": assessment.reason or "risk_block"},
                 )
                 return
         ctx = RunContext(
@@ -1318,7 +1940,14 @@ async def _execute_plan_step(
             provenance=provenance_payload,
             references=references_payload,
         )
+        call_started = perf_counter()
         result = await tool.run({**step.args, "id": step.id}, ctx)
+        duration_ms = round((perf_counter() - call_started) * 1000, 3)
+        if result.wall_time_ms is None:
+            try:
+                result.wall_time_ms = int(duration_ms)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                result.wall_time_ms = None
         per_plan_results.append(result)
         all_results.append(result)
         result_index[step.id] = result
@@ -1345,6 +1974,7 @@ async def _execute_plan_step(
             tool=step.tool,
             ok=result.ok,
             wall_time_ms=result.wall_time_ms,
+            duration_ms=duration_ms,
             provenance=provenance_payload,
             sensor=sensor_metadata,
             safety_tier=safety_tier,
@@ -1360,6 +1990,7 @@ async def _execute_plan_step(
             "stdout": result.stdout,
             "time": goal_spec.get("time", "1970-01-01T00:00:00+00:00"),
             "provenance": [asdict(src) for src in result.provenance],
+            "agent": agent_name,
             "summary": output_summary.get("summary"),
             "tokens": output_summary.get("tokens"),
             "latency_ms": result.wall_time_ms,
@@ -1384,6 +2015,39 @@ async def _execute_plan_step(
             episode_entry.pop("embedding", None)
         memory_entries.append(episode_entry)
 
+        if not result.ok:
+            failure_reason = _truncate_text(result.stdout) or "tool failure"
+            orchestrator._emit(
+                "orchestrator.tool_failed",
+                run_id=run_id,
+                plan_id=plan.id,
+                step_id=step.id,
+                tool=step.tool,
+                duration_ms=duration_ms,
+                stdout=_truncate_text(result.stdout),
+                agent=agent_name,
+            )
+            if step_trace is not None:
+                step_trace.mark_completed(succeeded=False, reason=failure_reason)
+                orchestrator._emit(
+                    "orchestrator.plan_step_completed",
+                    run_id=run_id,
+                    plan_id=plan.id,
+                    step_id=step.id,
+                    success=False,
+                    reason=failure_reason,
+                    duration_ms=step_trace.duration_ms,
+                    agent=agent_name,
+                )
+            orchestrator._log_negotiation(
+                sender=agent_name,
+                recipient=default_agent_name,
+                kind="status",
+                content={"plan_id": plan.id, "step_id": step.id},
+                outcomes={"success": False, "reason": failure_reason},
+            )
+            return
+
     if step.sub_steps:
         await _execute_plan_steps(
             orchestrator=orchestrator,
@@ -1407,6 +2071,7 @@ async def _execute_plan_step(
             "index": branch_index,
             "condition": condition_payload,
             "next_steps": [child.id for child in branch.steps],
+            "agent": agent_name,
         }
         branch_taken = _should_execute_branch(branch.condition, result_index)
         working_attempt.record_branch_decision(
@@ -1415,6 +2080,22 @@ async def _execute_plan_step(
             metadata=branch_metadata,
             taken=branch_taken,
         )
+        plan_branch_trace = None
+        if step_trace is not None:
+            plan_branch_trace = step_trace.get_branch(branch_index)
+        if plan_branch_trace is not None and branch_taken is False:
+            # Branch skipped; emit completion events for the skipped steps.
+            for skipped_step in plan_branch_trace.steps:
+                orchestrator._emit(
+                    "orchestrator.plan_step_completed",
+                    run_id=run_id,
+                    plan_id=plan.id,
+                    step_id=skipped_step.step_id,
+                    success=False,
+                    reason="branch_not_taken",
+                    duration_ms=skipped_step.duration_ms,
+                    agent=agent_name,
+                )
         orchestrator._emit(
             "orchestrator.working_memory.branch",
             run_id=run_id,
@@ -1423,6 +2104,7 @@ async def _execute_plan_step(
             branch_index=branch_index,
             taken=branch_taken,
             condition=condition_payload,
+            agent=agent_name,
         )
         if branch_taken:
             await _execute_plan_steps(
@@ -1440,6 +2122,54 @@ async def _execute_plan_step(
                 risk_assessments=risk_assessments,
                 working_attempt=working_attempt,
             )
+
+    if step_trace is not None and step_trace.status not in {"failed", "skipped"}:
+        child_statuses: List[str] = [child.status for child in step_trace.children]
+        for branch in step_trace.branches:
+            if branch.taken:
+                child_statuses.extend(child.status for child in branch.steps)
+        failed_child = any(status == "failed" for status in child_statuses)
+        pending_child = any(status in {"pending", "running"} for status in child_statuses)
+        succeeded = not failed_child and not pending_child
+        if step.tool:
+            result = result_index.get(step.id)
+            if result is not None:
+                succeeded = succeeded and result.ok
+        step_trace.mark_completed(succeeded=succeeded)
+        orchestrator._emit(
+            "orchestrator.plan_step_completed",
+            run_id=run_id,
+            plan_id=plan.id,
+            step_id=step.id,
+            success=succeeded,
+            duration_ms=step_trace.duration_ms,
+            agent=step_trace.agent,
+        )
+        orchestrator._log_negotiation(
+            sender=agent_name,
+            recipient=default_agent_name,
+            kind="status",
+            content={"plan_id": plan.id, "step_id": step.id},
+            outcomes={"success": succeeded},
+        )
+    elif step_trace is not None and step_trace.status == "skipped":
+        orchestrator._emit(
+            "orchestrator.plan_step_completed",
+            run_id=run_id,
+            plan_id=plan.id,
+            step_id=step.id,
+            success=False,
+            reason=step_trace.failure_reason or "skipped",
+            duration_ms=step_trace.duration_ms,
+            agent=step_trace.agent,
+        )
+        orchestrator._log_negotiation(
+            sender=agent_name,
+            recipient=default_agent_name,
+            kind="status",
+            content={"plan_id": plan.id, "step_id": step.id},
+            outcomes={"success": False, "reason": step_trace.failure_reason or "skipped"},
+        )
 
 
 def _should_execute_branch(

@@ -9,6 +9,8 @@ from agi.src.core.critic import Critic
 from agi.src.core.memory import MemoryStore
 from agi.src.core.orchestrator import Orchestrator, load_working_memory_snapshot
 from agi.src.core.planner import Planner
+from agi.src.core.reflection import summarise_working_memory
+from agi.src.core.telemetry import InMemorySink, Telemetry
 from agi.src.core.types import ToolResult
 from agi.src.core.world_model import WorldModel
 
@@ -784,3 +786,134 @@ def test_orchestrator_surfaces_vector_similarity_in_memory_context(tmp_path):
     assert similarity_summary.get("max", 0) > 0
     first_match = semantic["matches"][0]
     assert first_match.get("vector_similarity", 0) > 0
+
+
+def test_orchestrator_supports_multi_agent_execution(tmp_path):
+    coordinator_tool = StubTool(ok=True)
+    builder_tool = StubTool(ok=True)
+
+    planner_response = {
+        "agents": [
+            {"name": "coordinator", "default": True, "tool_names": ["coord_tool"]},
+            {"name": "builder", "tool_names": ["builder_tool"]},
+        ],
+        "plans": [
+            {
+                "id": "plan-collab",
+                "claim_ids": ["claim"],
+                "steps": [
+                    {
+                        "id": "coord-step",
+                        "tool": "coord_tool",
+                        "agent": "coordinator",
+                        "args": {},
+                        "sub_steps": [
+                            {
+                                "id": "builder-step",
+                                "tool": "builder_tool",
+                                "agent": "builder",
+                                "args": {},
+                            }
+                        ],
+                    }
+                ],
+                "expected_cost": {},
+                "risks": [],
+                "ablations": [],
+            }
+        ],
+    }
+
+    planner = Planner(llm=lambda payload: json.dumps(planner_response))
+    critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    world_model = WorldModel()
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools={"coord_tool": coordinator_tool},
+        agents={"builder": {"tools": {"builder_tool": builder_tool}}},
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+    )
+
+    asyncio.run(orchestrator.run({"goal": "collaborative demo"}, {}))
+
+    assert coordinator_tool.invocations == ["coord-step"]
+    assert builder_tool.invocations == ["builder-step"]
+
+    manifest_path = next(tmp_path.glob("run_*/manifest.json"))
+    manifest = json.loads(manifest_path.read_text())
+    agents = {entry["name"] for entry in manifest.get("agents", [])}
+    assert agents == {"coordinator", "builder"}
+    plan_steps = manifest["plans"][0]["steps"][0]
+    assert plan_steps["agent"] == "coordinator"
+    assert plan_steps["children"][0]["agent"] == "builder"
+
+
+def test_negotiations_summary_includes_recent_messages(tmp_path):
+    planner_response = {
+        "plans": [
+            {
+                "id": "plan-negotiation",
+                "claim_ids": ["claim-negotiation"],
+                "steps": [
+                    {
+                        "id": "delegated-step",
+                        "tool": "delegate_tool",
+                        "agent": "delegate",
+                        "args": {},
+                        "safety_level": "T0",
+                    }
+                ],
+                "expected_cost": {},
+                "risks": [],
+                "ablations": [],
+            }
+        ]
+    }
+
+    planner = Planner(llm=lambda payload: json.dumps(planner_response))
+    critic = Critic(llm=lambda plan: json.dumps({"status": "PASS"}))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    world_model = WorldModel()
+    telemetry_sink = InMemorySink()
+    telemetry = Telemetry(sinks=[telemetry_sink])
+    orchestrator = Orchestrator(
+        planner=planner,
+        critic=critic,
+        tools={"delegate_tool": StubTool(ok=True)},
+        memory=memory,
+        world_model=world_model,
+        working_dir=tmp_path,
+        telemetry=telemetry,
+    )
+
+    asyncio.run(orchestrator.run({"goal": "negotiate responsibilities"}, {}))
+
+    working_memory = orchestrator.working_memory
+    assert working_memory is not None
+    assert working_memory.negotiations, "expected negotiation transcript"
+
+    summary = summarise_working_memory(working_memory)
+    negotiation_summary = summary.get("negotiations")
+    assert negotiation_summary is not None
+    assert negotiation_summary["count"] == len(working_memory.negotiations)
+    recent_messages = negotiation_summary["recent"]
+    assert recent_messages, "expected sample of recent negotiations"
+    assert any(
+        message.get("kind") == "delegation" and message.get("recipient") == "delegate"
+        for message in recent_messages
+    )
+
+    negotiation_events = [event for event in telemetry_sink.events if event.get("event") == "orchestrator.negotiation"]
+    assert negotiation_events, "expected negotiation telemetry events"
+
+    negotiation_records = memory.recent(types=["negotiation"])
+    assert negotiation_records, "expected negotiation memory records"
+    assert any(record.get("kind") == "delegation" for record in negotiation_records)
+    summary_records = memory.recent(types=["negotiation_summary"])
+    assert summary_records, "expected negotiation summary memory record"
+    latest_summary = summary_records[-1]
+    assert latest_summary.get("negotiation_count") == len(working_memory.negotiations)

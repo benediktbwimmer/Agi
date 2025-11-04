@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, Set
 
-from .types import BranchCondition, Plan, PlanBranch, PlanStep, Prediction, Claim
+from .types import AgentProfile, BranchCondition, Plan, PlanBranch, PlanStep, Prediction, Claim
 from .reflection import normalise_insight_records, summarise_reflection_insights
 from .memory_features import extract_memory_features
 
@@ -16,6 +16,7 @@ class PlannerError(RuntimeError):
 @dataclass
 class Planner:
     llm: Callable[[Dict[str, Any]], str]
+    _last_agents: List[AgentProfile] = field(default_factory=list, init=False, repr=False)
 
     async def plan_from(
         self,
@@ -44,13 +45,44 @@ class Planner:
             raise PlannerError("Planner LLM returned invalid JSON") from exc
 
         plans: List[Plan] = []
+        agents: List[AgentProfile] = []
+        for agent_dict in data.get("agents", []):
+            if not isinstance(agent_dict, Mapping):
+                continue
+            name = agent_dict.get("name")
+            if not name:
+                continue
+            description = agent_dict.get("description")
+            default = bool(agent_dict.get("default", False))
+            raw_tools = agent_dict.get("tool_names") or agent_dict.get("tools") or []
+            tool_names: List[str] = []
+            if isinstance(raw_tools, Sequence) and not isinstance(raw_tools, (str, bytes)):
+                tool_names = [str(tool) for tool in raw_tools]
+            agents.append(
+                AgentProfile(
+                    name=str(name),
+                    description=str(description) if description else None,
+                    default=default,
+                    tool_names=tool_names,
+                )
+            )
+
         for plan_dict in data.get("plans", []):
-            plans.append(_parse_plan(plan_dict))
+            plan = _parse_plan(plan_dict)
+            plan.ensure_hierarchy(goal=plan.goal)
+            plans.append(plan)
+        self._last_agents = agents
         if not plans:
             raise PlannerError("Planner produced no plans")
         if reflective_summary:
             return _apply_reflective_bias(plans, reflective_summary)
         return plans
+
+    @property
+    def agent_profiles(self) -> List[AgentProfile]:
+        """Return the agent profiles reported by the last plan invocation."""
+
+        return list(self._last_agents)
 
 
 def _parse_plan(data: Dict[str, Any]) -> Plan:
@@ -61,6 +93,7 @@ def _parse_plan(data: Dict[str, Any]) -> Plan:
         expected_cost=data.get("expected_cost", {}),
         risks=list(data.get("risks", [])),
         ablations=list(data.get("ablations", [])),
+        goal=data.get("goal"),
     )
 
 
@@ -75,6 +108,7 @@ def _parse_plan_step(data: Dict[str, Any]) -> PlanStep:
         safety_level=data.get("safety_level", "T0"),
         description=data.get("description"),
         goal=data.get("goal"),
+        agent=data.get("agent"),
         sub_steps=sub_steps,
         branches=branches,
     )

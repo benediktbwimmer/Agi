@@ -14,6 +14,9 @@ dependencies = [
     "pydantic",
     "typer",
     "rich",
+    "jsonschema>=4.18.0,<5.0.0",
+    "fastapi>=0.110.0,<1.0.0",
+    "uvicorn[standard]>=0.23.0,<1.0.0",
 ]
 
 [project.scripts]
@@ -26,6 +29,10 @@ dev = [
     "pytest-cov",
     "hypothesis",
 ]
+
+[tool.setuptools.package-data]
+"agi.src.core.schemas" = ["*.json"]
+"agi.src.oversight.static" = ["*.html", "*.css", "*.js"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -40,7 +40,7 @@ def test_append_and_fetch_episode(temp_store: SQLiteEpisodicMemoryStore) -> None
 
 
 def test_fetch_by_time_and_tags(temp_store: SQLiteEpisodicMemoryStore) -> None:
-    base = datetime.utcnow() - timedelta(hours=1)
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
     first = temp_store.append_episode(
         [EpisodeEvent(event_type="thought", content="First", timestamp=base)],
         tags=["alpha", "beta"],

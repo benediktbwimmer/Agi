@@ -49,7 +49,7 @@ class RuntimeGatekeeper(Gatekeeper):
         self._runtime_block_pending = True
         self._invocation_count = 0
 
-    def review(self, tier: str, *, tool: str | None = None) -> bool:
+    def review(self, tier: str, *, tool: str | None = None, context=None) -> bool:
         self._invocation_count += 1
         if (
             tool == "dummy"

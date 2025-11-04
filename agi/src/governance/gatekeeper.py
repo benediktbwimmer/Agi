@@ -108,7 +108,13 @@ class Gatekeeper:
                 return self._apply_evaluation_bias(self._normalise_tier(str(override)), tool)
         return self._apply_evaluation_bias(default_tier, tool)
 
-    def review(self, tier: str, *, tool: str | None = None) -> bool:
+    def review(
+        self,
+        tier: str,
+        *,
+        tool: str | None = None,
+        context: Mapping[str, Any] | None = None,  # context reserved for subclasses
+    ) -> bool:
         requested = self._normalise_tier(tier)
         allowed = self._max_allowed_for(tool)
         return self._tier_value(requested) <= self._tier_value(allowed)

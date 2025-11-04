@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
+from time import perf_counter
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 try:  # pragma: no cover - optional dependency
@@ -148,7 +149,22 @@ class MemoryStore:
                     record = json.loads(line)
                     self._index_record(record)
 
+    def _emit(self, event: str, **payload: Any) -> None:
+        if self.telemetry is None:
+            return
+        filtered = {key: value for key, value in payload.items() if value is not None}
+        self.telemetry.emit(event, **filtered)
+
+    def _emit_timed(self, start: float, event: str, **payload: Any) -> None:
+        if self.telemetry is None:
+            return
+        duration_ms = round((perf_counter() - start) * 1000, 3)
+        filtered = {key: value for key, value in payload.items() if value is not None}
+        filtered["duration_ms"] = duration_ms
+        self.telemetry.emit(event, **filtered)
+
     def append(self, record: Dict[str, Any]) -> None:
+        start = perf_counter()
         line = json.dumps(record, sort_keys=True)
         with self._lock:
             with self.path.open("a", encoding="utf-8") as f:
@@ -156,49 +172,130 @@ class MemoryStore:
                 f.flush()
                 os.fsync(f.fileno())
         self._index_record(record)
-        if self.telemetry is not None:
-            payload = {
-                "record_type": record.get("type"),
-                "tool": record.get("tool"),
-                "plan_id": record.get("plan_id"),
-                "call_id": record.get("call_id"),
-                "path": str(self.path),
-            }
-            self.telemetry.emit("memory.append", **{k: v for k, v in payload.items() if v is not None})
+        payload = {
+            "record_type": record.get("type"),
+            "tool": record.get("tool"),
+            "plan_id": record.get("plan_id"),
+            "call_id": record.get("call_id"),
+            "path": str(self.path),
+            "bytes": len(line.encode("utf-8")),
+        }
+        self._emit_timed(start, "memory.append", **payload)
 
     def query_by_claim(self, claim_id: str) -> List[Dict[str, Any]]:
-        return [json.loads(json.dumps(r)) for r in self._claim_index.get(claim_id, [])]
+        start = perf_counter()
+        results = [json.loads(json.dumps(r)) for r in self._claim_index.get(claim_id, [])]
+        self._emit_timed(
+            start,
+            "memory.query",
+            method="claim",
+            key=str(claim_id),
+            result_count=len(results),
+        )
+        return results
 
     def query_by_time(self, start: str, end: str) -> List[Dict[str, Any]]:
+        timer = perf_counter()
         start_ts = _normalise_time(start)
         end_ts = _normalise_time(end)
         start_idx = bisect_left(self._time_keys, start_ts)
         end_idx = bisect_right(self._time_keys, end_ts)
-        return [
+        results = [
             json.loads(json.dumps(record))
             for record in self._time_records[start_idx:end_idx]
         ]
+        self._emit_timed(
+            timer,
+            "memory.query",
+            method="time",
+            window_start=start,
+            window_end=end,
+            result_count=len(results),
+        )
+        return results
 
     def query_by_tool(self, tool_name: str) -> List[Dict[str, Any]]:
-        return [json.loads(json.dumps(r)) for r in self._tool_index.get(tool_name, [])]
+        start = perf_counter()
+        results = [json.loads(json.dumps(r)) for r in self._tool_index.get(tool_name, [])]
+        self._emit_timed(
+            start,
+            "memory.query",
+            method="tool",
+            tool=str(tool_name),
+            result_count=len(results),
+        )
+        return results
 
     def query_by_source_hash(self, digest: str) -> List[Dict[str, Any]]:
-        return [json.loads(json.dumps(r)) for r in self._source_index.get(digest, [])]
+        start = perf_counter()
+        results = [json.loads(json.dumps(r)) for r in self._source_index.get(digest, [])]
+        self._emit_timed(
+            start,
+            "memory.query",
+            method="source_hash",
+            digest=digest,
+            result_count=len(results),
+        )
+        return results
 
     def query_by_plan(self, plan_id: str) -> List[Dict[str, Any]]:
-        return [json.loads(json.dumps(r)) for r in self._plan_index.get(plan_id, [])]
+        start = perf_counter()
+        results = [json.loads(json.dumps(r)) for r in self._plan_index.get(plan_id, [])]
+        self._emit_timed(
+            start,
+            "memory.query",
+            method="plan",
+            plan_id=str(plan_id),
+            result_count=len(results),
+        )
+        return results
 
     def query_reflection_insights(self, goal: str, *, limit: int = 3) -> List[Dict[str, Any]]:
+        start = perf_counter()
         if limit <= 0:
-            return []
+            results: List[Dict[str, Any]] = []
+            self._emit_timed(
+                start,
+                "memory.query",
+                method="reflection_insights",
+                goal=goal,
+                limit=limit,
+                result_count=0,
+            )
+            return results
         key = goal.strip().lower()
         if not key:
+            self._emit_timed(
+                start,
+                "memory.query",
+                method="reflection_insights",
+                goal=goal,
+                limit=limit,
+                result_count=0,
+            )
             return []
         records = self._goal_index.get(key, [])
         if not records:
+            self._emit_timed(
+                start,
+                "memory.query",
+                method="reflection_insights",
+                goal=goal,
+                limit=limit,
+                result_count=0,
+            )
             return []
         selected = [record for record in records if record.get("type") == "reflection_insight"][-limit:]
-        return [json.loads(json.dumps(record)) for record in selected]
+        results = [json.loads(json.dumps(record)) for record in selected]
+        self._emit_timed(
+            start,
+            "memory.query",
+            method="reflection_insights",
+            goal=goal,
+            limit=limit,
+            result_count=len(results),
+        )
+        return results
 
     def iter_reflection_insights(
         self,
@@ -208,6 +305,7 @@ class MemoryStore:
     ) -> List[Dict[str, Any]]:
         """Return reflection insight records ordered by timestamp."""
 
+        start = perf_counter()
         records: List[Dict[str, Any]] = []
         if goal is not None:
             key = goal.strip().lower()
@@ -234,7 +332,16 @@ class MemoryStore:
         records.sort(key=_key)
         if limit is not None and limit > 0:
             records = records[-limit:]
-        return [json.loads(json.dumps(record)) for record in records]
+        results = [json.loads(json.dumps(record)) for record in records]
+        self._emit_timed(
+            start,
+            "memory.query",
+            method="reflection_iter",
+            goal=goal,
+            limit=limit,
+            result_count=len(results),
+        )
+        return results
 
     def temporal_window(
         self,
@@ -253,13 +360,23 @@ class MemoryStore:
         ``types``.
         """
 
-        if before is None and after is None:
-            raise ValueError("temporal_window requires at least one of 'before' or 'after'")
-        if not self._time_records:
-            return []
+        start_timer = perf_counter()
 
         before_delta = _coerce_timedelta(before)
         after_delta = _coerce_timedelta(after)
+        if before_delta is None and after_delta is None:
+            raise ValueError("temporal_window requires at least one of 'before' or 'after'")
+        if not self._time_records:
+            self._emit_timed(
+                start_timer,
+                "memory.query",
+                method="temporal_window",
+                anchor=str(anchor) if anchor is not None else None,
+                before_seconds=None if before_delta is None else before_delta.total_seconds(),
+                after_seconds=None if after_delta is None else after_delta.total_seconds(),
+                result_count=0,
+            )
+            return []
 
         if anchor is None:
             anchor_dt = self._time_keys[-1]
@@ -285,12 +402,30 @@ class MemoryStore:
             if limit is not None and limit > 0 and len(results) >= limit:
                 break
 
+        self._emit_timed(
+            start_timer,
+            "memory.query",
+            method="temporal_window",
+            anchor=anchor_dt.isoformat(),
+            before_seconds=None if before_delta is None else before_delta.total_seconds(),
+            after_seconds=None if after_delta is None else after_delta.total_seconds(),
+            result_count=len(results),
+        )
         return results
 
     def recent(
         self, *, limit: int = 20, types: Iterable[str] | None = None
     ) -> List[Dict[str, Any]]:
+        start = perf_counter()
         if limit <= 0:
+            self._emit_timed(
+                start,
+                "memory.query",
+                method="recent",
+                limit=limit,
+                type_filter=list(types) if types is not None else None,
+                result_count=0,
+            )
             return []
         type_filter = {t for t in types} if types is not None else None
         results: List[Dict[str, Any]] = []
@@ -300,7 +435,16 @@ class MemoryStore:
             results.append(json.loads(json.dumps(record)))
             if len(results) >= limit:
                 break
-        return list(reversed(results))
+        final_results = list(reversed(results))
+        self._emit_timed(
+            start,
+            "memory.query",
+            method="recent",
+            limit=limit,
+            type_filter=sorted(type_filter) if type_filter is not None else None,
+            result_count=len(final_results),
+        )
+        return final_results
 
     def semantic_search(
         self,
@@ -311,11 +455,22 @@ class MemoryStore:
     ) -> List[Dict[str, Any]]:
         """Return memory records that best match ``query`` lexically."""
 
+        start = perf_counter()
+        type_filter = {t for t in types} if types is not None else None
+        filter_list = sorted(type_filter) if type_filter is not None else None
         if limit <= 0:
+            self._emit_timed(
+                start,
+                "memory.query",
+                method="semantic_search",
+                query=query,
+                limit=limit,
+                type_filter=filter_list,
+                result_count=0,
+            )
             return []
 
         tokens = _tokenise(query)
-        type_filter = {t for t in types} if types is not None else None
         lexical_scores: Counter[int] = Counter()
         for token in tokens:
             for record_idx in self._token_index.get(token, []):
@@ -350,6 +505,15 @@ class MemoryStore:
             combined_scores[idx] = combined_scores.get(idx, 0.0) + similarity * vector_weight
 
         if not combined_scores:
+            self._emit_timed(
+                start,
+                "memory.query",
+                method="semantic_search",
+                query=query,
+                limit=limit,
+                type_filter=filter_list,
+                result_count=0,
+            )
             return []
 
         def _sort_key(index: int) -> Tuple[float, float, int]:
@@ -370,6 +534,15 @@ class MemoryStore:
             if vector_similarity:
                 record["vector_similarity"] = round(vector_similarity, 4)
             results.append(record)
+        self._emit_timed(
+            start,
+            "memory.query",
+            method="semantic_search",
+            query=query,
+            limit=limit,
+            type_filter=filter_list,
+            result_count=len(results),
+        )
         return results
 
     def search(
@@ -389,10 +562,22 @@ class MemoryStore:
         search returning records in chronological order.
         """
 
-        if limit <= 0:
-            return []
-
+        start_timer = perf_counter()
         type_filter = {t for t in types} if types is not None else None
+        filter_list = sorted(type_filter) if type_filter is not None else None
+        if limit <= 0:
+            self._emit_timed(
+                start_timer,
+                "memory.query",
+                method="search",
+                query=query,
+                limit=limit,
+                window_start=str(start) if start is not None else None,
+                window_end=str(end) if end is not None else None,
+                type_filter=filter_list,
+                result_count=0,
+            )
+            return []
 
         start_dt = _coerce_datetime(start) if start is not None else None
         end_dt = _coerce_datetime(end) if end is not None else None
@@ -418,6 +603,17 @@ class MemoryStore:
 
         if query is None or not query.strip():
             if not self._time_records:
+                self._emit_timed(
+                    start_timer,
+                    "memory.query",
+                    method="search",
+                    query=None,
+                    limit=limit,
+                    window_start=start_dt.isoformat() if start_dt else None,
+                    window_end=end_dt.isoformat() if end_dt else None,
+                    type_filter=filter_list,
+                    result_count=0,
+                )
                 return []
 
             if start_dt is None:
@@ -436,6 +632,17 @@ class MemoryStore:
                 results.append(json.loads(json.dumps(record)))
                 if len(results) >= limit:
                     break
+            self._emit_timed(
+                start_timer,
+                "memory.query",
+                method="search",
+                query=None,
+                limit=limit,
+                window_start=start_dt.isoformat() if start_dt else None,
+                window_end=end_dt.isoformat() if end_dt else None,
+                type_filter=filter_list,
+                result_count=len(results),
+            )
             return results
 
         tokens = _tokenise(query)
@@ -475,6 +682,17 @@ class MemoryStore:
             combined_scores[idx] = combined_scores.get(idx, 0.0) + similarity * vector_weight
 
         if not combined_scores:
+            self._emit_timed(
+                start_timer,
+                "memory.query",
+                method="search",
+                query=query,
+                limit=limit,
+                window_start=start_dt.isoformat() if start_dt else None,
+                window_end=end_dt.isoformat() if end_dt else None,
+                type_filter=filter_list,
+                result_count=0,
+            )
             return []
 
         def _sort_key(index: int) -> Tuple[float, float, int]:
@@ -495,6 +713,17 @@ class MemoryStore:
             if vector_similarity:
                 record["vector_similarity"] = round(vector_similarity, 4)
             results.append(record)
+        self._emit_timed(
+            start_timer,
+            "memory.query",
+            method="search",
+            query=query,
+            limit=limit,
+            window_start=start_dt.isoformat() if start_dt else None,
+            window_end=end_dt.isoformat() if end_dt else None,
+            type_filter=filter_list,
+            result_count=len(results),
+        )
         return results
 
     def _index_record(self, record: Dict[str, Any]) -> None:
