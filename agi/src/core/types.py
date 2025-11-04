@@ -315,6 +315,7 @@ class PlanStep:
     safety_level: str = "T0"
     description: Optional[str] = None
     goal: Optional[str] = None
+    agent: Optional[str] = None
     sub_steps: List["PlanStep"] = field(default_factory=list)
     branches: List["PlanBranch"] = field(default_factory=list)
 
@@ -355,6 +356,7 @@ class Plan:
     expected_cost: Dict[str, Optional[float]]
     risks: List[str]
     ablations: List[str]
+    goal: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.steps = [_coerce_plan_step(step) for step in self.steps]
@@ -362,6 +364,28 @@ class Plan:
     def iter_tool_calls(self) -> Iterator[PlanStep]:
         for step in self.steps:
             yield from step.iter_tool_calls()
+
+    def ensure_hierarchy(self, *, goal: Optional[str] = None) -> None:
+        """Ensure the plan exposes a hierarchical wrapper for downstream consumers."""
+
+        needs_wrapper = False
+        for step in self.steps:
+            if step.sub_steps or step.branches or step.tool is None:
+                return
+        if len(self.steps) == 1:
+            needs_wrapper = True
+        elif len(self.steps) > 1:
+            needs_wrapper = True
+        if not needs_wrapper:
+            return
+        wrapper = PlanStep(
+            id=f"{self.id}-root",
+            tool=None,
+            goal=goal or self.goal,
+            description="Plan root",
+            sub_steps=[step for step in self.steps],
+        )
+        self.steps = [wrapper]
 
 
 def _coerce_plan_step(step: Any) -> PlanStep:
@@ -383,6 +407,7 @@ def _coerce_plan_step(step: Any) -> PlanStep:
             safety_level=data.get("safety_level", "T0"),
             description=data.get("description"),
             goal=data.get("goal"),
+            agent=data.get("agent"),
             sub_steps=[_coerce_plan_step(s) for s in data.get("sub_steps", [])],
             branches=[_coerce_plan_branch(b) for b in data.get("branches", [])],
         )
@@ -499,3 +524,33 @@ __all__ = [
     "ToolResult",
     "UID",
 ]
+@dataclass
+class AgentProfile:
+    """Describes a collaborating agent and its capabilities."""
+
+    name: UID
+    description: Optional[str] = None
+    default: bool = False
+    tool_names: List[str] = field(default_factory=list)
+
+
+@dataclass
+class NegotiationMessage:
+    """Structured exchange between agents during collaboration."""
+
+    timestamp: str
+    sender: str
+    recipient: str
+    kind: str
+    content: Dict[str, Any] = field(default_factory=dict)
+    outcomes: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "sender": self.sender,
+            "recipient": self.recipient,
+            "kind": self.kind,
+            "content": dict(self.content),
+            "outcomes": dict(self.outcomes),
+        }

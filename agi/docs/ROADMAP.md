@@ -41,6 +41,8 @@ incrementally without blocking critical research tracks.
 * **Hierarchical Planning** – Enhance the planner to support sub-goals and
   conditional branches while keeping compatibility with the `Plan` dataclass.
   Introduce partial plan execution and re-planning hooks in the orchestrator.
+  (Initial tracing + manifest support shipped in v0.3; next step is to expand
+  LLM prompts and replanning heuristics.)
 * **Tool Abstractions** – Expand the tool library (simulation, retrieval, coding)
   with capability metadata and automatic safety-level negotiation.
 * **Belief Tracking Persistence** – Back the `WorldModel` with durable storage so
@@ -65,9 +67,13 @@ incrementally without blocking critical research tracks.
 * **Governance Policies** – Expand the `Gatekeeper` interface with policy packs
   and experiment with dynamic risk scoring informed by execution traces.
 * **Oversight Interfaces** – Develop dashboards for human-in-the-loop review of
-  plans, tool calls, and belief updates, with override capabilities.
+  plans, tool calls, and belief updates, with override capabilities. (Prototype
+  oversight console and interactive gatekeeper shipped in v0.5, serving manifests,
+  telemetry, and a live approval queue via `agi-cli oversight serve`.)
 * **Multi-Agent Coordination** – Prototype cooperative and adversarial agent
-  setups to stress-test safety controls and memory isolation.
+  setups to stress-test safety controls and memory isolation. (Initial
+  orchestrator support for agent assignments landed alongside manifest v0.4; negotiation
+  transcripts now persist into episodic memory with collaboration analytics.)
 * **Value Alignment Research** – Integrate normative modelling experiments and
   alignment evaluations using external datasets.
 
@@ -109,4 +115,3 @@ incrementally without blocking critical research tracks.
 * `agi/src/core/world_model.py` — belief tracking with logistic updates.
 * `agi/src/governance/gatekeeper.py` — policy enforcement entrypoint.
 * `agi/src/evals/harness.py` — evaluation harness for running benchmark suites.
-

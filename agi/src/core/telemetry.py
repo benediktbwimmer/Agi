@@ -9,6 +9,11 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, List, MutableMapping, Protocol
 
+try:  # pragma: no cover - optional oversight integration
+    from ..oversight.store import OversightStore
+except ImportError:  # pragma: no cover - avoid hard dependency at import time
+    OversightStore = None  # type: ignore[assignment]
+
 
 class TelemetrySink(Protocol):
     """A destination for telemetry events."""
@@ -66,3 +71,18 @@ class JsonLinesSink:
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
 
+
+@dataclass
+class OversightSink:
+    """Telemetry sink that mirrors events into an :class:`OversightStore`."""
+
+    store: "OversightStore"
+
+    def __post_init__(self) -> None:  # pragma: no cover - defensive input validation
+        if OversightStore is None:
+            raise RuntimeError("OversightStore is unavailable; install oversight extras")
+        if not isinstance(self.store, OversightStore):
+            raise TypeError("store must be an OversightStore instance")
+
+    def write(self, event: Dict[str, Any]) -> None:
+        self.store.record_telemetry(event)

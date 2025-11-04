@@ -1,0 +1,1052 @@
+{
+  "$defs": {
+    "ManifestAgentProfile": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "default": {
+          "type": "boolean",
+          "default": false,
+          "title": "Default"
+        },
+        "tool_names": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tool Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ManifestAgentProfile",
+      "type": "object"
+    },
+    "ManifestBeliefUpdate": {
+      "description": "Serialised representation of :class:`Belief`.",
+      "properties": {
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "credence": {
+          "title": "Credence",
+          "type": "number"
+        },
+        "last_updated": {
+          "title": "Last Updated",
+          "type": "string"
+        },
+        "support": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Support"
+        },
+        "conflict": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conflict"
+        },
+        "variance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Variance"
+        },
+        "uncertainty": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uncertainty"
+        },
+        "confidence_interval": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence Interval"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/ManifestEvidenceEntry"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "claim_id",
+        "credence",
+        "last_updated"
+      ],
+      "title": "ManifestBeliefUpdate",
+      "type": "object"
+    },
+    "ManifestCritique": {
+      "description": "Critique emitted by the critic during planning.",
+      "properties": {
+        "plan_id": {
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "reviewer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "critic",
+          "title": "Reviewer"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "amendments": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Amendments"
+        },
+        "issues": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issues"
+        }
+      },
+      "required": [
+        "plan_id",
+        "status"
+      ],
+      "title": "ManifestCritique",
+      "type": "object"
+    },
+    "ManifestEvidenceEntry": {
+      "description": "Structured evidence backing a belief update.",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/ManifestSource"
+        },
+        "outcome": {
+          "title": "Outcome",
+          "type": "string"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight"
+        },
+        "raw_weight": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Weight"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed At"
+        }
+      },
+      "required": [
+        "source",
+        "outcome"
+      ],
+      "title": "ManifestEvidenceEntry",
+      "type": "object"
+    },
+    "ManifestNegotiationMessage": {
+      "properties": {
+        "timestamp": {
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "sender": {
+          "title": "Sender",
+          "type": "string"
+        },
+        "recipient": {
+          "title": "Recipient",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "content": {
+          "additionalProperties": true,
+          "title": "Content",
+          "type": "object"
+        },
+        "outcomes": {
+          "additionalProperties": true,
+          "title": "Outcomes",
+          "type": "object"
+        }
+      },
+      "required": [
+        "timestamp",
+        "sender",
+        "recipient",
+        "kind"
+      ],
+      "title": "ManifestNegotiationMessage",
+      "type": "object"
+    },
+    "ManifestPlan": {
+      "properties": {
+        "plan_id": {
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "claim_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Claim Ids",
+          "type": "array"
+        },
+        "approved": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approved"
+        },
+        "execution_succeeded": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Execution Succeeded"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/ManifestPlanStep"
+          },
+          "title": "Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "plan_id",
+        "claim_ids"
+      ],
+      "title": "ManifestPlan",
+      "type": "object"
+    },
+    "ManifestPlanBranch": {
+      "properties": {
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "condition": {
+          "title": "Condition"
+        },
+        "taken": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Taken"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/ManifestPlanStep"
+          },
+          "title": "Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "index",
+        "condition"
+      ],
+      "title": "ManifestPlanBranch",
+      "type": "object"
+    },
+    "ManifestPlanStep": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Goal"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool"
+        },
+        "agent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "depth": {
+          "title": "Depth",
+          "type": "integer"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Id"
+        },
+        "branch_index": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Branch Index"
+        },
+        "branch_condition": {
+          "default": null,
+          "title": "Branch Condition"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "failure_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Reason"
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/ManifestPlanStep"
+          },
+          "title": "Children",
+          "type": "array"
+        },
+        "branches": {
+          "items": {
+            "$ref": "#/$defs/ManifestPlanBranch"
+          },
+          "title": "Branches",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "depth",
+        "status"
+      ],
+      "title": "ManifestPlanStep",
+      "type": "object"
+    },
+    "ManifestRiskAssessment": {
+      "description": "Serialised representation of :class:`RiskAssessment`.",
+      "properties": {
+        "plan_id": {
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "step_id": {
+          "title": "Step Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "requested_level": {
+          "title": "Requested Level",
+          "type": "string"
+        },
+        "tool_level": {
+          "title": "Tool Level",
+          "type": "string"
+        },
+        "effective_level": {
+          "title": "Effective Level",
+          "type": "string"
+        },
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "plan_id",
+        "step_id",
+        "tool_name",
+        "requested_level",
+        "tool_level",
+        "effective_level",
+        "approved"
+      ],
+      "title": "ManifestRiskAssessment",
+      "type": "object"
+    },
+    "ManifestSafetyDecision": {
+      "description": "Serialised representation of :class:`SafetyDecision`.",
+      "properties": {
+        "plan_id": {
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "step_id": {
+          "title": "Step Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "requested_level": {
+          "title": "Requested Level",
+          "type": "string"
+        },
+        "tool_level": {
+          "title": "Tool Level",
+          "type": "string"
+        },
+        "effective_level": {
+          "title": "Effective Level",
+          "type": "string"
+        },
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "plan_id",
+        "step_id",
+        "tool_name",
+        "requested_level",
+        "tool_level",
+        "effective_level",
+        "approved"
+      ],
+      "title": "ManifestSafetyDecision",
+      "type": "object"
+    },
+    "ManifestSource": {
+      "description": "Normalised provenance metadata.",
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "ref": {
+          "title": "Ref",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "kind",
+        "ref"
+      ],
+      "title": "ManifestSource",
+      "type": "object"
+    },
+    "ManifestToolCapability": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "safety_tier": {
+          "title": "Safety Tier",
+          "type": "string"
+        },
+        "parameters": {
+          "items": {
+            "$ref": "#/$defs/ManifestToolParameter"
+          },
+          "title": "Parameters",
+          "type": "array"
+        },
+        "outputs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "safety_tier"
+      ],
+      "title": "ManifestToolCapability",
+      "type": "object"
+    },
+    "ManifestToolParameter": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "schema": {
+          "additionalProperties": true,
+          "title": "Schema",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "title": "ManifestToolParameter",
+      "type": "object"
+    },
+    "ManifestToolResult": {
+      "description": "Serialised representation of :class:`ToolResult`.",
+      "properties": {
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "cost_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Tokens"
+        },
+        "wall_time_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wall Time Ms"
+        },
+        "stdout": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stdout"
+        },
+        "data": {
+          "default": null,
+          "title": "Data"
+        },
+        "figures": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Figures"
+        },
+        "provenance": {
+          "items": {
+            "$ref": "#/$defs/ManifestSource"
+          },
+          "title": "Provenance",
+          "type": "array"
+        }
+      },
+      "required": [
+        "call_id",
+        "ok"
+      ],
+      "title": "ManifestToolResult",
+      "type": "object"
+    },
+    "ManifestToolSpec": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "safety_tier": {
+          "title": "Safety Tier",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "input_schema": {
+          "additionalProperties": true,
+          "title": "Input Schema",
+          "type": "object"
+        },
+        "output_schema": {
+          "additionalProperties": true,
+          "title": "Output Schema",
+          "type": "object"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/ManifestToolCapability"
+          },
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "sensor_profile": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sensor Profile"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "safety_tier"
+      ],
+      "title": "ManifestToolSpec",
+      "type": "object"
+    }
+  },
+  "description": "Versioned manifest describing an orchestrator execution.",
+  "properties": {
+    "schema_version": {
+      "default": "0.4.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "goal": {
+      "additionalProperties": true,
+      "title": "Goal",
+      "type": "object"
+    },
+    "constraints": {
+      "additionalProperties": true,
+      "title": "Constraints",
+      "type": "object"
+    },
+    "tool_results": {
+      "items": {
+        "$ref": "#/$defs/ManifestToolResult"
+      },
+      "title": "Tool Results",
+      "type": "array"
+    },
+    "belief_updates": {
+      "items": {
+        "$ref": "#/$defs/ManifestBeliefUpdate"
+      },
+      "title": "Belief Updates",
+      "type": "array"
+    },
+    "safety_audit": {
+      "items": {
+        "$ref": "#/$defs/ManifestSafetyDecision"
+      },
+      "title": "Safety Audit",
+      "type": "array"
+    },
+    "risk_assessments": {
+      "items": {
+        "$ref": "#/$defs/ManifestRiskAssessment"
+      },
+      "title": "Risk Assessments",
+      "type": "array"
+    },
+    "critiques": {
+      "items": {
+        "$ref": "#/$defs/ManifestCritique"
+      },
+      "title": "Critiques",
+      "type": "array"
+    },
+    "tool_catalog": {
+      "items": {
+        "$ref": "#/$defs/ManifestToolSpec"
+      },
+      "title": "Tool Catalog",
+      "type": "array"
+    },
+    "plans": {
+      "items": {
+        "$ref": "#/$defs/ManifestPlan"
+      },
+      "title": "Plans",
+      "type": "array"
+    },
+    "agents": {
+      "items": {
+        "$ref": "#/$defs/ManifestAgentProfile"
+      },
+      "title": "Agents",
+      "type": "array"
+    },
+    "negotiations": {
+      "items": {
+        "$ref": "#/$defs/ManifestNegotiationMessage"
+      },
+      "title": "Negotiations",
+      "type": "array"
+    }
+  },
+  "required": [
+    "run_id",
+    "created_at",
+    "goal",
+    "constraints",
+    "tool_results",
+    "belief_updates"
+  ],
+  "title": "RunManifest",
+  "type": "object"
+}

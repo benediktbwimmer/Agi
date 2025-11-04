@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Experience replay summarisation helpers for Putnam-style continual learning."""
 
+from collections import Counter
 from dataclasses import asdict
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
@@ -124,6 +125,41 @@ def summarise_experience(
         experience["working_memory"] = working_summary
     if scratchpad:
         experience["scratchpad"] = scratchpad
+    negotiations = list(manifest.negotiations or [])
+    if negotiations:
+        agent_pairs: Counter[tuple[str, str]] = Counter()
+        kind_counts: Counter[str] = Counter()
+        agents: set[str] = set()
+        sample: list[Dict[str, Any]] = []
+        for message in negotiations:
+            sender = _get_field(message, "sender") or "unknown"
+            recipient = _get_field(message, "recipient") or "unknown"
+            kind_value = _get_field(message, "kind") or "unspecified"
+            timestamp = _get_field(message, "timestamp")
+            agent_pairs[(sender, recipient)] += 1
+            kind_counts[kind_value.lower()] += 1
+            agents.update({sender, recipient})
+            if len(sample) < 5:
+                sample.append(
+                    {
+                        "time": timestamp,
+                        "from": sender,
+                        "to": recipient,
+                        "kind": kind_value,
+                    }
+                )
+        experience["negotiations"] = {
+            "count": len(negotiations),
+            "agents": sorted(agent for agent in agents if agent),
+            "pairs": [
+                {"pair": f"{pair[0]}->{pair[1]}", "count": count}
+                for pair, count in agent_pairs.most_common(5)
+            ],
+            "kinds": [
+                {"kind": kind, "count": count} for kind, count in kind_counts.most_common()
+            ],
+            "sample": sample,
+        }
     return experience
 
 

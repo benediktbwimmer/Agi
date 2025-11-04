@@ -37,7 +37,8 @@ class DummyLLM:
 def test_planner_parses_llm_output():
     planner = Planner(llm=DummyLLM())
     plans = asyncio.run(planner.plan_from([{"claim": "c1"}]))
-    assert plans[0].steps[0].tool == "python_runner"
+    assert plans[0].steps[0].sub_steps[0].tool == "python_runner"
+    assert planner.agent_profiles == []
 
 
 def test_planner_parses_hierarchical_steps():
@@ -53,11 +54,13 @@ def test_planner_parses_hierarchical_steps():
                                 {
                                     "id": "root",
                                     "tool": "setup",
+                                    "agent": "coordinator",
                                     "args": {},
                                     "sub_steps": [
                                         {
                                             "id": "child",
                                             "tool": "child_tool",
+                                            "agent": "worker-1",
                                             "args": {},
                                         }
                                     ],
@@ -68,6 +71,7 @@ def test_planner_parses_hierarchical_steps():
                                                 {
                                                     "id": "success",
                                                     "tool": "success_tool",
+                                                    "agent": "worker-2",
                                                     "args": {},
                                                 }
                                             ],
@@ -88,6 +92,7 @@ def test_planner_parses_hierarchical_steps():
                             "expected_cost": {},
                             "risks": [],
                             "ablations": [],
+                            "agent": "coordinator",
                         }
                     ]
                 }
@@ -97,11 +102,15 @@ def test_planner_parses_hierarchical_steps():
     plans = asyncio.run(planner.plan_from([{"claim": "c1"}]))
     step = plans[0].steps[0]
     assert isinstance(step, PlanStep)
-    assert step.sub_steps[0].tool == "child_tool"
+    tool_steps = list(plans[0].iter_tool_calls())
+    assert tool_steps[0].agent == "coordinator"
+    assert tool_steps[1].tool == "child_tool"
+    assert tool_steps[1].agent == "worker-1"
     assert len(step.branches) == 2
     assert isinstance(step.branches[0].condition, BranchCondition)
     assert step.branches[0].condition.kind == "success"
     assert step.branches[1].condition.kind == "failure"
+    assert planner.agent_profiles == []
 
 
 def test_planner_requires_plan():
@@ -211,3 +220,42 @@ def test_planner_prefers_low_risk_plans_with_reflection():
     hypothesis_context = llm.payload["hypotheses"][0]["reflective_context"]
     assert hypothesis_context["focus_count"] >= 1
     assert "analysis" in features.get("modalities", [])
+
+
+def test_planner_records_agent_profiles():
+    class MultiAgentLLM:
+        def __call__(self, payload):
+            return json.dumps(
+                {
+                    "agents": [
+                        {"name": "coordinator", "default": True, "tool_names": ["planner"]},
+                        {"name": "worker", "description": "executes tools", "tool_names": ["executor"]},
+                    ],
+                    "plans": [
+                        {
+                            "id": "plan-1",
+                            "claim_ids": ["claim"],
+                            "steps": [
+                                {
+                                    "id": "s1",
+                                    "tool": "executor",
+                                    "agent": "worker",
+                                    "args": {},
+                                }
+                            ],
+                            "expected_cost": {},
+                            "risks": [],
+                            "ablations": [],
+                        }
+                    ],
+                }
+            )
+
+    planner = Planner(llm=MultiAgentLLM())
+    plans = asyncio.run(planner.plan_from([{"claim": "c1"}]))
+    tool_steps = list(plans[0].iter_tool_calls())
+    assert tool_steps[0].agent == "worker"
+    profiles = planner.agent_profiles
+    assert {profile.name for profile in profiles} == {"coordinator", "worker"}
+    default_profiles = [profile for profile in profiles if profile.default]
+    assert len(default_profiles) == 1 and default_profiles[0].name == "coordinator"

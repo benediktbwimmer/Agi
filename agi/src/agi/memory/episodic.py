@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import sqlite3
 from pathlib import Path
@@ -20,7 +20,7 @@ StateDeserializer = Callable[[str], Any]
 class EpisodeEvent(BaseModel):
     """A discrete event captured during an episode."""
 
-    timestamp: datetime = Field(default_factory=lambda: datetime.utcnow())
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     event_type: str
     content: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -168,7 +168,7 @@ class SQLiteEpisodicMemoryStore(EpisodicMemoryStore):
         if not events:
             raise ValueError("Episodes must contain at least one event")
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         created = created_at or now
         episode_uuid = episode_id or str(uuid.uuid4())
         tags = list(tags or [])
@@ -328,7 +328,7 @@ class SQLiteEpisodicMemoryStore(EpisodicMemoryStore):
             if episode_row is None:
                 return None
 
-            new_updated_at = datetime.utcnow()
+            new_updated_at = datetime.now(timezone.utc)
             conn.execute(
                 "UPDATE episodes SET summary = ?, updated_at = ? WHERE id = ?;",
                 (summary, new_updated_at.isoformat(), episode_id),
@@ -337,9 +337,13 @@ class SQLiteEpisodicMemoryStore(EpisodicMemoryStore):
             if keep_events == 0:
                 conn.execute("DELETE FROM events WHERE episode_id = ?;", (episode_id,))
             else:
-                event_ids = [row[0] for row in conn.execute(
-                    "SELECT id FROM events WHERE episode_id = ? ORDER BY timestamp DESC;", (episode_id,)
-                ).fetchall()]
+                event_ids = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT id FROM events WHERE episode_id = ? ORDER BY timestamp DESC, id DESC;",
+                        (episode_id,),
+                    ).fetchall()
+                ]
                 to_remove = event_ids[keep_events:]
                 if to_remove:
                     conn.executemany("DELETE FROM events WHERE id = ?;", [(eid,) for eid in to_remove])

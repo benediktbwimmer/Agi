@@ -125,6 +125,53 @@ def _write_manifest(path: Path) -> None:
                 ),
             ),
         ],
+        plans=[
+            {
+                "plan_id": "plan-1",
+                "claim_ids": ["claim-1"],
+                "approved": True,
+                "execution_succeeded": True,
+                "steps": [
+                    {
+                        "id": "plan-1-root",
+                        "goal": "demo",
+                        "tool": None,
+                        "agent": "coordinator",
+                        "kind": "composite",
+                        "depth": 0,
+                        "parent_id": None,
+                        "branch_index": None,
+                        "branch_condition": None,
+                        "status": "succeeded",
+                        "started_at": "2024-01-01T00:00:00+00:00",
+                        "completed_at": "2024-01-01T00:00:01+00:00",
+                        "duration_ms": 10.0,
+                        "failure_reason": None,
+                        "children": [
+                            {
+                                "id": "call-1",
+                                "goal": None,
+                                "tool": "calculator",
+                                "agent": "coordinator",
+                                "kind": "tool",
+                                "depth": 1,
+                                "parent_id": "plan-1-root",
+                                "branch_index": None,
+                                "branch_condition": None,
+                                "status": "succeeded",
+                                "started_at": "2024-01-01T00:00:00+00:00",
+                                "completed_at": "2024-01-01T00:00:00.500000+00:00",
+                                "duration_ms": 5.0,
+                                "failure_reason": None,
+                                "children": [],
+                                "branches": [],
+                            }
+                        ],
+                        "branches": [],
+                    }
+                ],
+            }
+        ],
     )
     manifest.write(path)
 
@@ -158,6 +205,9 @@ def test_manifest_summary_command(tmp_path: Path) -> None:
     assert result.exit_code == 0
     summary = json.loads(result.stdout)
     assert summary["tool_invocations"] == 2
+    assert summary["plans"]
+    assert summary["plans"][0]["structure"]
+    assert summary["agents"] == []  # manifest did not define agents in this stub
     assert summary["tool_failures"] == 1
     assert summary["safety_decisions"]["blocked"] == 1
     assert summary["risk_assessments"]["blocked"] == 1

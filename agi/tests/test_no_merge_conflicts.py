@@ -16,7 +16,11 @@ def _git_dir() -> Path:
 def _tracked_files() -> list[Path]:
     repo_root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
-        ["git", "ls-files"], check=True, capture_output=True, text=True
+        ["git", "ls-files"],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
     )
     return [repo_root / Path(line.strip()) for line in result.stdout.splitlines() if line]
 

@@ -101,6 +101,9 @@ workspace.
   include aggregated insight summaries and per-hypothesis reflective context,
   allowing deliberation tags (e.g., safety critiques) to influence plan selection
   heuristics directly.
+* **Negotiation memory persistence (`agi/src/core/orchestrator.py`)** – Agent negotiation
+  transcripts are captured in episodic memory with aggregate collaboration stats, and
+  experience replay now highlights cross-agent negotiation patterns for future planning.
 
 ## 4. Decision and Action Layer
 
